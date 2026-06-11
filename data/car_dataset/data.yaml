@@ -1,0 +1,7 @@
+# YOLOv8 dataset config for the F1TENTH car detector (single class).
+# Point train/val at the labeled images; labels/ holds matching YOLO .txt files.
+path: ./data/car_dataset
+train: images/train
+val: images/val
+names:
+  0: car

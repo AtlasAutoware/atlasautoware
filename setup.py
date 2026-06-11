@@ -1,9 +1,7 @@
 from setuptools import setup
 import os
 from glob import glob
-
 package_name = 'f1tenth_gym_ros'
-
 setup(
     name=package_name,
     version='0.0.0',
@@ -26,7 +24,14 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'gym_bridge = f1tenth_gym_ros.gym_bridge:main'
+            'gym_bridge = f1tenth_gym_ros.gym_bridge:main',
+            'racing_agent = f1tenth_gym_ros.pursuit_agent:main',
+            'race_agent = f1tenth_gym_ros.race_agent:main',
+            'opponent_driver = f1tenth_gym_ros.opponent_driver:main',
+            'mapping_driver = f1tenth_gym_ros.mapping_driver:main',
+            'track_learner = f1tenth_gym_ros.track_learner:main',
+            'camera_perception = f1tenth_gym_ros.camera_perception:main',
         ],
     },
 )
+ 

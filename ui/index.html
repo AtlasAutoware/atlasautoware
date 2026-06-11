@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>F1TENTH · Race Control</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --txt:#e6edf3; --mut:#8b949e;
+    --acc:#2f81f7; --grn:#3fb950; --red:#f85149; --amb:#d29922; --blu:#388bfd;
+  }
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:14px 22px;border-bottom:1px solid var(--line);display:flex;
+    align-items:center;gap:14px}
+  header h1{font-size:17px;margin:0;letter-spacing:.5px}
+  header .dot{width:9px;height:9px;border-radius:50%;background:var(--mut)}
+  header .dot.live{background:var(--grn);box-shadow:0 0 8px var(--grn)}
+  .wrap{display:grid;grid-template-columns:1fr 1fr;gap:18px;padding:18px;max-width:1500px;margin:0 auto}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
+  .card h2{margin:0 0 14px;font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--mut)}
+  label{display:flex;justify-content:space-between;font-size:13px;margin:12px 0 4px;color:var(--mut)}
+  label b{color:var(--txt)}
+  input[type=range]{width:100%;accent-color:var(--acc)}
+  button{background:var(--acc);color:#fff;border:0;border-radius:7px;padding:10px 16px;
+    font-weight:600;cursor:pointer;font-size:14px}
+  button:hover{filter:brightness(1.1)} button:disabled{opacity:.5;cursor:default}
+  button.stop{background:var(--red)} button.ghost{background:#21262d;border:1px solid var(--line)}
+  .row{display:flex;gap:10px;align-items:center;margin-top:14px}
+  img#overlay{width:100%;border-radius:8px;margin-top:14px;background:#fff;min-height:120px}
+  .stats{font-size:12px;color:var(--mut);margin-top:10px;white-space:pre-wrap;font-family:ui-monospace,monospace}
+  .badge{display:inline-block;padding:4px 14px;border-radius:20px;font-weight:700;letter-spacing:.5px}
+  .telem{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0}
+  .tile{background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:12px;text-align:center}
+  .tile .v{font-size:24px;font-weight:700} .tile .k{font-size:11px;color:var(--mut);text-transform:uppercase}
+  .thought{background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:12px;
+    min-height:46px;font-size:13px;color:var(--txt)}
+  canvas{width:100%;background:#0d1117;border:1px solid var(--line);border-radius:8px;margin-top:14px}
+  .legend{font-size:11px;color:var(--mut);margin-top:6px;display:flex;gap:14px;flex-wrap:wrap}
+  .legend span::before{content:"";display:inline-block;width:9px;height:9px;border-radius:50%;
+    margin-right:5px;vertical-align:middle}
+  .lg-ego::before{background:#fff} .lg-l::before{background:var(--red)}
+  .lg-c::before{background:var(--blu)} .lg-f::before{background:var(--grn)}
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="livedot"></div>
+  <h1>F1TENTH · RACE CONTROL</h1>
+  <span id="livetxt" style="color:var(--mut);font-size:12px">idle</span>
+</header>
+
+<div class="wrap">
+  <!-- ───────── Raceline studio ───────── -->
+  <div class="card">
+    <h2>Raceline studio — competition track</h2>
+    <label>Wall clearance (margin) <b id="vMargin">0.35 m</b></label>
+    <input type="range" id="margin" min="0.12" max="0.6" step="0.01" value="0.35">
+    <label>Late-apex / overtaking bias <b id="vApex">1.0</b></label>
+    <input type="range" id="apex" min="0" max="2" step="0.1" value="1.0">
+    <label>Max lateral grip (a_lat) <b id="vAlat">6.5 m/s²</b></label>
+    <input type="range" id="alat" min="4" max="9" step="0.1" value="6.5">
+    <label>Top speed cap <b id="vVmax">7.0 m/s</b></label>
+    <input type="range" id="vmax" min="4" max="9" step="0.1" value="7.0">
+    <div class="row">
+      <button id="gen" onclick="generate()">Generate raceline</button>
+      <span id="genmsg" style="color:var(--mut);font-size:12px"></span>
+    </div>
+    <img id="overlay" src="/api/image/comp_raceline_annotated.png" alt="raceline overlay">
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <!-- ───────── Race control ───────── -->
+  <div class="card">
+    <h2>Race control — opponent-aware run</h2>
+    <div class="row">
+      <button id="start" onclick="startRace()">▶ Start race</button>
+      <button class="stop" onclick="stopRace()">■ Stop</button>
+      <span class="badge" id="mode" style="background:#21262d">—</span>
+    </div>
+    <div class="telem">
+      <div class="tile"><div class="v" id="tSpeed">0.0</div><div class="k">speed m/s</div></div>
+      <div class="tile"><div class="v" id="tLap">0</div><div class="k">lap</div></div>
+      <div class="tile"><div class="v" id="tOpp">0</div><div class="k">opponents</div></div>
+    </div>
+    <div class="thought" id="thought">Start a race to see the agent's live reasoning.</div>
+    <canvas id="map" width="640" height="420"></canvas>
+    <div class="legend">
+      <span class="lg-ego">ego</span><span class="lg-l">lidar</span>
+      <span class="lg-c">camera</span><span class="lg-f">fused</span>
+      <span style="color:var(--mut)">line color = speed (green fast → red slow)</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const MODE_BG={CRUISE:'var(--grn)',ATTACK:'var(--red)',DEFEND:'var(--blu)',EVADE:'var(--amb)'};
+function bind(id,suf,el){const s=document.getElementById(id);const o=document.getElementById(el);
+  const f=()=>o.textContent=s.value+suf; s.oninput=f; f();}
+bind('margin',' m','vMargin'); bind('apex','','vApex');
+bind('alat',' m/s²','vAlat'); bind('vmax',' m/s','vVmax');
+
+async function generate(){
+  const btn=document.getElementById('gen'); btn.disabled=true;
+  document.getElementById('genmsg').textContent='optimizing…';
+  const body={margin:+margin.value,apex_bias:+apex.value,a_lat:+alat.value,v_max:+vmax.value};
+  try{
+    const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    const j=await r.json();
+    document.getElementById('overlay').src='/api/image/'+j.image;
+    document.getElementById('stats').textContent=Object.entries(j.stats||{})
+      .map(([k,v])=>k+': '+v).join('\n');
+    document.getElementById('genmsg').textContent=j.ok?'done ✓':'failed';
+    loadRaceline();
+  }catch(e){document.getElementById('genmsg').textContent='error';}
+  btn.disabled=false;
+}
+async function startRace(){document.getElementById('genmsg');
+  await fetch('/api/race/start',{method:'POST'});}
+async function stopRace(){await fetch('/api/race/stop',{method:'POST'});}
+
+// ── live mini-map ──
+let RL=null;
+async function loadRaceline(){try{RL=await (await fetch('/api/raceline')).json();}catch(e){}}
+function spdColor(t){t=Math.max(0,Math.min(1,t));
+  return t<.5?`rgb(255,${Math.round(510*t)},60)`:`rgb(${Math.round(255*(2-2*t))},255,60)`;}
+function draw(state){
+  const c=document.getElementById('map'),g=c.getContext('2d');
+  g.clearRect(0,0,c.width,c.height);
+  if(!RL||!RL.x.length)return;
+  const xs=RL.x,ys=RL.y,sp=RL.speed;
+  const minx=Math.min(...xs),maxx=Math.max(...xs),miny=Math.min(...ys),maxy=Math.max(...ys);
+  const pad=30,sx=(c.width-2*pad)/(maxx-minx),sy=(c.height-2*pad)/(maxy-miny),s=Math.min(sx,sy);
+  const T=(x,y)=>[pad+(x-minx)*s, c.height-pad-(y-miny)*s];
+  const vmax=Math.max(...sp);
+  g.lineWidth=3;
+  for(let i=0;i<xs.length;i++){const j=(i+1)%xs.length;
+    const[a,b]=T(xs[i],ys[i]),[d,e]=T(xs[j],ys[j]);
+    g.strokeStyle=spdColor(sp[i]/vmax);g.beginPath();g.moveTo(a,b);g.lineTo(d,e);g.stroke();}
+  if(!state||!state.running)return;
+  // opponents
+  for(const o of (state.opponents||[])){const[a,b]=T(o.x,o.y);
+    g.fillStyle={lidar:'#f85149',camera:'#388bfd',fused:'#3fb950'}[o.source]||'#f85149';
+    g.beginPath();g.arc(a,b,6,0,7);g.fill();}
+  // ego triangle
+  if(state.ego){const[a,b]=T(state.ego[0],state.ego[1]),th=state.ego[2];
+    g.save();g.translate(a,b);g.rotate(-th);g.fillStyle='#fff';
+    g.beginPath();g.moveTo(11,0);g.lineTo(-7,6);g.lineTo(-7,-6);g.closePath();g.fill();g.restore();}
+}
+async function poll(){
+  try{
+    const st=await (await fetch('/api/state')).json();
+    const live=st.running;
+    document.getElementById('livedot').className='dot'+(live?' live':'');
+    document.getElementById('livetxt').textContent=live?'racing — telemetry live':'idle';
+    const mb=document.getElementById('mode');
+    mb.textContent=live?st.mode:'—'; mb.style.background=live?(MODE_BG[st.mode]||'#21262d'):'#21262d';
+    if(live){
+      document.getElementById('tSpeed').textContent=(st.speed||0).toFixed(1);
+      document.getElementById('tLap').textContent=st.lap||0;
+      document.getElementById('tOpp').textContent=st.opp_count||0;
+      document.getElementById('thought').textContent=st.thought||'';
+    }
+    draw(st);
+  }catch(e){}
+}
+loadRaceline(); setInterval(poll,200);
+</script>
+</body>
+</html>
