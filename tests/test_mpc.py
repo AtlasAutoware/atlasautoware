@@ -22,7 +22,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), 'f1tenth_gym_ros'))
-from mpc_controller import KinematicMPC
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mpc_controller import KinematicMPC, predict_state
+from closed_loop import run_lap
 
 
 def load_raceline(path):
@@ -51,6 +53,77 @@ def cross_track(px, py, rx, ry, j, n):
     tn = math.hypot(tx, ty) + 1e-9
     nx, ny = -ty / tn, tx / tn
     return abs((px - rx[j]) * nx + (py - ry[j]) * ny)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression tests (pytest): MPC under actuator delay, with the ROS node's
+# delay-compensation flow (predict through the in-flight command pipeline,
+# recompute the nearest index from the predicted pose, then solve).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _comp_raceline():
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    rl_path = os.path.join(repo, 'racelines', 'comp_raceline.csv')
+    if not os.path.exists(rl_path):
+        rl_path = os.path.join(repo, 'racelines', 'best_raceline.csv')
+    return load_raceline(rl_path)
+
+
+def test_predict_state_history_matches_scalar_when_constant():
+    # a pipeline of identical commands must be bit-identical to the scalar form
+    s = predict_state(1.0, 2.0, 0.3, 3.0, 0.12, 4.0, 0.1, 0.33)
+    h = predict_state(1.0, 2.0, 0.3, 3.0, [0.12] * 5, [4.0] * 5, 0.1, 0.33)
+    assert s == h
+
+
+def test_predict_state_history_applies_oldest_first():
+    # [a then b] over the window == integrating a for delay/2 then b for delay/2
+    a, b = (0.2, 3.0), (-0.1, 5.0)
+    two = predict_state(0.0, 0.0, 0.0, 4.0, [a[0], b[0]], [a[1], b[1]],
+                        0.10, 0.33)
+    mid = predict_state(0.0, 0.0, 0.0, 4.0, a[0], a[1], 0.05, 0.33)
+    chained = predict_state(*mid, b[0], b[1], 0.05, 0.33)
+    assert all(abs(p - q) < 1e-12 for p, q in zip(two, chained))
+    # and it must NOT equal holding only the newest command (the old bug)
+    newest_only = predict_state(0.0, 0.0, 0.0, 4.0, b[0], b[1], 0.10, 0.33)
+    assert abs(two[2] - newest_only[2]) > 1e-3
+
+
+def test_delay_compensated_lap_tracks_tightly():
+    """Closed loop with 0.10 s actuator delay + the node's compensation flow.
+
+    Mirrors raceline_mpc._loop exactly: predict_state through the in-flight
+    command buffer (oldest first), recompute nearest from the predicted pose,
+    solve from there.  Must complete the lap with near-zero-delay tracking.
+    """
+    rx, ry, rh, rc, rv = _comp_raceline()
+    n = len(rx)
+    L, delay, ctrl_dt = 0.33, 0.10, 0.02
+    mpc = KinematicMPC(wheelbase=L, horizon=12, dt=0.08,
+                       v_max=float(rv.max()) + 0.5)
+    assert mpc.available, 'osqp not available'
+    mpc.set_raceline(rx, ry, rh, rc, rv)
+
+    ticks = int(round(delay / ctrl_dt))
+    buf = [(0.0, 2.0)] * ticks        # in flight; matches run_lap's prefill
+    near = [0]
+
+    def control(px, py, yaw, v, j):
+        px, py, yaw, v = predict_state(
+            px, py, yaw, v, [c[0] for c in buf], [c[1] for c in buf],
+            delay, L)
+        near[0] = nearest_idx(px, py, rx, ry, near[0], n)
+        out = mpc.solve((px, py, yaw, v), near[0])
+        steer, v_t = out if out is not None else (0.0, max(v, 1.0))
+        buf.append((steer, v_t))
+        buf.pop(0)
+        return steer, v_t
+
+    res = run_lap(control, rx, ry, rh, wheelbase=L, dt=ctrl_dt,
+                  actuator_delay=delay)
+    assert res['completed'], 'did not complete a lap under 0.10 s delay'
+    assert res['xte_mean'] < 0.2, f"loose tracking ({res['xte_mean']:.3f} m)"
+    assert res['xte_max'] < 0.6, f"ran wide ({res['xte_max']:.3f} m)"
 
 
 def main():
