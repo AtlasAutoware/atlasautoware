@@ -48,12 +48,21 @@ latencies because it forward-simulated the newest command while the
 actuator was still executing older in-flight commands; a pipeline-aware
 predictor holds lap time and tracking at zero-delay levels across the
 full $0$--$140\,\mathrm{ms}$ sweep.
-%%ABS_MPCC%%
+(3)~\emph{Contouring control, honestly evaluated}: a
+curvature-integrated LTV-MPCC \cite{liniger,cimpcc} with a fully
+self-enforced friction budget does \emph{not} reproduce the literature's
+11--12\% lap-time gains --- the offline line already exhausts the
+corridor at equal budget --- but it ties the best budget-valid tracking
+configuration's lap time ($47.24$ vs.\ $47.28\,\mathrm{s}$) while
+guaranteeing $0.281\,\mathrm{m}$ driven wall clearance (tracker:
+$0.000\,\mathrm{m}$), and the comparison exposes that the tracker's
+faster nominal laps transiently over-drive the friction budget
+$3.4\times$ in the grip-free benchmark.
 Alongside, the audit fixed eight verified defects (three
 safety-relevant) and removed $0.12\,\mathrm{rad}$ steering
 discontinuities from the pursuit fallback.  Every adopted change is
 gated on the shared benchmark; rejected hypotheses are reported with
-data.  The test suite grew from 52 to %%NTESTS%% passing tests.
+data.  The test suite grew from 52 to 73 passing tests.
 \end{abstract}
 
 \section{Introduction}
@@ -342,7 +351,86 @@ the \ms{100} case.
 \section{Lap time III: contouring control under an honest budget}
 \label{sec:mpcc}
 
-%%MPCC_SECTION%%
+Model Predictive Contouring Control \cite{liniger} replaces
+speed-profile tracking with online progress maximization over the track
+corridor; the curvature-integrated variant CiMPCC reports 11--12\%
+lap-time reductions on F1Tenth hardware \cite{cimpcc}.  We implemented a
+kinematic LTV-MPCC on the stack's persistent-OSQP pattern
+(\texttt{f1tenth\_gym\_ros/mpcc\_controller.py}): lag/contour error
+split along the station tangent and normal, CiMPCC-style contour
+weights shaped by upcoming curvature ($4 \rightarrow 24$ toward
+apexes), a linear progress reward replacing speed tracking, real-time
+iteration relinearized about the previous solution \emph{fractionally
+shifted} by the control period, and hard corridor bounds from the map's
+distance field with soft--hard slack.  Horizon $20 \times
+0.08\,\mathrm{s}$; solve times $1.4 / 1.6 / 2.7\,\mathrm{ms}$
+(mean/p95/max), zero failures.
+
+\paragraph{The benchmark must be made cheat-proof first.}
+The harness plant has no grip limit and no walls, so a controller free
+to choose its own speeds can buy lap time with physics the car does not
+have.  The MPCC therefore \emph{self-enforces} the same budget the
+velocity profiler uses ($a_{\mathrm{lat}} \le 6.5\,\mathrm{m/s^2}$,
+friction-ellipse-coupled longitudinal limits, $v \le 7\,\mathrm{m/s}$)
+via per-stage curvature speed caps, ellipse-bounded acceleration, and an
+output governor --- and all metrics below are measured on the
+\emph{driven trajectory}, not the plan.
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{@{}l rrrrr r rr@{}}
+    \toprule
+    Controller & lap (s) & clr$_{\min}$ (m) & $a_{\mathrm{lat}}^{\max}$
+    & $a_{\mathrm{lat}}^{p99.5}$ & $\overline{\mathrm{XTE}}$ (m)
+    & fails & p95 (ms) \\
+    \midrule
+    tracking MPC (nominal) & 43.22 & 0.000 & 22.03 & 16.33 & 0.115 & 0 & 0.6 \\
+    tracking + governor & 46.52 & 0.000 & 6.50 & 6.50 & 0.996 & 0 & 0.9 \\
+    tracking + governor, $0.8\times$ profile & 47.28 & 0.000 & 6.50 & 6.50 & 0.108 & 0 & 0.7 \\
+    \textbf{MPCC (self-enforced budget)} & \textbf{47.24} & \textbf{0.281} & \textbf{6.44} & 6.07 & 0.026 & 0 & 1.6 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Contouring vs.\ tracking on the new competition line, equal
+  physics budget ($a_{\mathrm{lat}} \le 6.5\,\mathrm{m/s^2}$);
+  \texttt{tools/benchmark\_mpcc.py}; all quantities measured on the
+  driven trajectory, including the standardized initial pose-error
+  recovery.  The nominal tracker's $43.22\,\mathrm{s}$ is not a real
+  lap: it pulls up to $22\,\mathrm{m/s^2}$ lateral ($3.4\times$ budget)
+  and touches walls.  On the old wall-cutting line (not shown), MPCC is
+  the only controller that produces a physically valid lap at all
+  ($50.26\,\mathrm{s}$, clearance $0.307\,\mathrm{m}$).}
+  \label{tab:mpcc}
+\end{table}
+
+\paragraph{Result.}
+Table~\ref{tab:mpcc}: MPCC ties the best budget-valid tracking
+configuration on lap time ($47.24$ vs.\ $47.28\,\mathrm{s}$) while
+guaranteeing what no tracking row achieves --- a $0.281\,\mathrm{m}$
+driven clearance floor, budget compliance
+($a_{\mathrm{lat}}^{\max} = 6.44 < 6.5\,\mathrm{m/s^2}$), and a
+$4\times$ smaller mean cross-track deviation from the corridor centre.
+We did \emph{not} reproduce CiMPCC's 11--12\% lap-time gain, and the
+reason is structural rather than a tuning failure: those gains come
+from exploiting track width the reference does not use, and this
+stack's reference is already a minimum-curvature line over the same
+corridor (Section~\ref{sec:raceline}).  At equal friction budget there
+is simply little width left to spend.  Conversely, when the reference
+is bad --- the old wall-cutting line --- MPCC's corridor constraint
+makes it the only controller that completes a feasible lap, which is
+the property that matters when the global planner fails on race day.
+
+Four engineering details proved load-bearing and are documented in
+\texttt{docs/mpcc.md}: (i)~when the control rate differs from the
+stage rate, the warm-start must be \emph{fractionally} shifted --- a
+full-stage shift silently postpones planned braking forever;
+(ii)~every stage needs an anchor to the profiler's global speed
+profile, or slow corners enter the horizon too late to brake for;
+(iii)~plan at $0.95\times$ the lateral budget but enforce $1.0\times$
+at the output --- the gap is the closed loop's steering authority; and
+(iv)~corridor bounds must threshold the distance field along the
+normal, since free-space probes overestimate room near diagonal
+walls.
 
 \section{Supporting result: smooth fallback steering}
 \label{sec:map}
@@ -510,7 +598,11 @@ the expected order: wall-aware minimum-curvature refinement
 \cite{heilmeier} ($-0.98\,\mathrm{s}$, with a clearance guarantee the
 old line never had), pipeline-aware delay compensation (up to
 $-27.9\,\mathrm{s}$ at \ms{140} vs.\ naive; the difference between a
-competitive lap and a crawl at real latencies)%%CONCL_MPCC%%.
+competitive lap and a crawl at real latencies), and contouring control
+--- which did not beat the tracking pipeline at equal budget, but tied
+it while adding the clearance and budget guarantees the tracking rows
+lack, and exposed that the nominal tracker's faster laps over-drive the
+benchmark's missing physics.
 Of the improvement hypotheses tested, the adopted ones are exactly
 those that survived a deterministic closed-loop benchmark with hard
 safety gates; the rejected ones are reported with data.  The general
