@@ -177,6 +177,7 @@ def _make_node():
     from rclpy.node import Node
     from ackermann_msgs.msg import AckermannDriveStamped
     from nav_msgs.msg import Odometry
+    from std_msgs.msg import Bool
 
     class DriveNode(Node):
         def __init__(self):
@@ -232,6 +233,18 @@ def _make_node():
             self.last_cmd = 0.0
             self._wd_warned = False
             self.backend.neutral()
+            # RC kill-switch gate: while /autonomy_enabled is False or stale,
+            # /drive is ignored and the throttle holds neutral.  '' = no gate
+            # (bench use); ALWAYS gate when driving outdoors/around people.
+            self.declare_parameter('enable_topic', '')
+            self.declare_parameter('enable_timeout', 1.0)
+            en_topic = self.get_parameter('enable_topic').value
+            self.gated = bool(en_topic)
+            self.enabled = not self.gated
+            self._last_enable = 0.0
+            if self.gated:
+                self.create_subscription(Bool, en_topic, self._enable_cb, 10)
+                self.get_logger().info(f'actuation gated on {en_topic}')
             self.create_subscription(
                 AckermannDriveStamped,
                 self.get_parameter('drive_topic').value, self._drive_cb, 1)
@@ -246,10 +259,30 @@ def _make_node():
                     1.0 / float(self.get_parameter('telemetry_hz').value),
                     self._telemetry)
 
+        def _enable_cb(self, msg):
+            was = self.enabled
+            self.enabled = bool(msg.data)
+            self._last_enable = time.monotonic()
+            if was and not self.enabled:                # disarm NOW, not at WD
+                try:
+                    self.backend.neutral()
+                except Exception:
+                    pass
+                self.get_logger().warning('autonomy disarmed — neutral')
+
+        def _gate_open(self):
+            if not self.gated:
+                return True
+            stale = time.monotonic() - self._last_enable > \
+                float(self.get_parameter('enable_timeout').value)
+            return self.enabled and not stale
+
         def _drive_cb(self, msg):
             self.last_cmd = time.monotonic()
             self._wd_warned = False
             if self.last_cmd < self.arm_until:          # arming: hold neutral
+                return
+            if not self._gate_open():                   # RC switch says no
                 return
             try:
                 self.backend.command(float(msg.drive.speed),

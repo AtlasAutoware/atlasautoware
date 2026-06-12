@@ -224,6 +224,7 @@ def _make_node():
             self.declare_parameter('conf', 0.35)
             self.declare_parameter('odom_topic', '/ego_racecar/odom')
             self.declare_parameter('backend', 'auto')  # auto|tensorrt|cuda|cpu
+            self.declare_parameter('car_class', 0)     # 0 custom model; 2 COCO
             topic = self.get_parameter('image_topic').value
             self.fx = float(self.get_parameter('fx').value)
             self.cx = float(self.get_parameter('cx').value)
@@ -233,7 +234,8 @@ def _make_node():
                 self.detector = make_detector(
                     self.get_parameter('model_path').value,
                     backend=self.get_parameter('backend').value,
-                    conf=float(self.get_parameter('conf').value))
+                    conf=float(self.get_parameter('conf').value),
+                    car_class=int(self.get_parameter('car_class').value))
                 self.get_logger().info(
                     f'YOLO car detector loaded (backend: {self.detector.backend})')
             except Exception as e:
