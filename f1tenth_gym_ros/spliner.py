@@ -125,7 +125,7 @@ def choose_side(x, y, opponent_s, window=4.0):
 
 def plan_overtake(raceline, opponent_s, opponent_d, side,
                   evasion_dist=0.65, ego_speed=0.0, v_max=8.0,
-                  inside_slowdown=0.9):
+                  inside_slowdown=0.9, hold_dist=0.0):
     """Deform the raceline around an opponent; returns (x, y, v) full arrays.
 
     raceline is an (x, y, v) tuple of equal-length closed-lap arrays.  The
@@ -137,6 +137,13 @@ def plan_overtake(raceline, opponent_s, opponent_d, side,
     window are returned untouched, so the result drops into any controller
     that already tracks the raceline.  Speeds keep the raceline profile,
     scaled by inside_slowdown when the pass is on the inside of the turn.
+
+    hold_dist > 0 keeps the full apex offset for that many metres PAST the
+    opponent before easing back in.  On a slow pass (small speed difference)
+    the ego sits alongside for a while: with the plain spline its lookahead
+    controller starts tracking the rejoin leg early and squeezes into the
+    opponent — holding the offset keeps the gap until genuinely clear.
+    hold_dist = 0 reproduces the original ForzaETH control points exactly.
     """
     rx, ry, rv = (np.asarray(a, float) for a in raceline)
     s, total = arc_lengths(rx, ry)
@@ -144,8 +151,15 @@ def plan_overtake(raceline, opponent_s, opponent_d, side,
     offsets = SPLINE_OFFSETS * scale
     sign = 1.0 if side == 'left' else -1.0
     d_apex = float(opponent_d) + sign * evasion_dist
-    d_ctrl = np.zeros(len(offsets))
-    d_ctrl[np.argmin(np.abs(offsets))] = d_apex
+    if hold_dist > 0.0:
+        rear = offsets[offsets < 0.0]
+        front = offsets[offsets > 0.0] + float(hold_dist)
+        offsets = np.concatenate([rear, [0.0, float(hold_dist)], front])
+        d_ctrl = np.zeros(len(offsets))
+        d_ctrl[len(rear)] = d_ctrl[len(rear) + 1] = d_apex
+    else:
+        d_ctrl = np.zeros(len(offsets))
+        d_ctrl[np.argmin(np.abs(offsets))] = d_apex
     spline = CubicSpline(offsets, d_ctrl, bc_type='clamped')
 
     rel = (s - float(opponent_s) + total / 2.0) % total - total / 2.0

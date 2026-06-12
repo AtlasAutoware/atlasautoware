@@ -26,6 +26,12 @@ Design choices that matter for a race:
     raw drifting VESC odom).
   - **Light control loop.**  No disk I/O, no heavy perception — just solve + brake
     + publish, so it holds 50 Hz and never trips a watchdog.
+  - **Optional head-to-head behavior.**  `enable_behavior:=true` adds the
+    ForzaETH GB_TRACK/TRAILING/OVERTAKE state machine (race_behavior.py):
+    opponents from a world-frame PoseArray (`opponent_topic`) are converted to
+    raceline Frenet, and the machine swaps the tracked line (raceline vs
+    spliner evasion line) and caps speed while trailing.  Default OFF — the
+    solo control path is untouched.
 
 Run:
     # sim
@@ -44,6 +50,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, Imu
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32
+from geometry_msgs.msg import PoseArray
 from ackermann_msgs.msg import AckermannDriveStamped
 from transforms3d.euler import quat2euler
 
@@ -52,8 +59,9 @@ from pursuit_agent import find_best_raceline, load_raceline, find_nearest
 from mpc_controller import KinematicMPC, TractionGovernor, predict_state
 from map_controller import MAPController
 from velocity_profiler import velocity_profile, segment_lengths
-from raceline_refiner import refine_raceline, map_corridors
+from raceline_refiner import refine_raceline, map_corridors, heading_curvature
 from grid_map import GridMap, map_path_for
+from race_behavior import RaceBehavior
 
 
 class RacelineMPC(Node):
@@ -85,6 +93,13 @@ class RacelineMPC(Node):
         self.declare_parameter('profile_a_accel', 4.0)  # m/s^2 engine limit
         self.declare_parameter('profile_a_brake', 8.0)  # m/s^2 braking limit
         self.declare_parameter('profile_v_max', 8.0)    # m/s profile ceiling
+        # head-to-head behavior (ForzaETH state machine; off = solo unchanged)
+        self.declare_parameter('enable_behavior', False)
+        self.declare_parameter('opponent_topic', '/camera_opponents_poses')
+        self.declare_parameter('trail_range', 8.0)      # m, engage distance
+        self.declare_parameter('clear_margin', 1.5)     # m behind to rejoin
+        self.declare_parameter('evasion_dist', 0.65)    # m, spliner apex offset
+        self.declare_parameter('opp_timeout', 0.5)      # s, stale-opponent drop
         scan_topic  = self.get_parameter('scan_topic').value
         odom_topic  = self.get_parameter('odom_topic').value
         drive_topic = self.get_parameter('drive_topic').value
@@ -164,6 +179,34 @@ class RacelineMPC(Node):
                                   curvature=self.rl_curv)
         self.get_logger().info('fallback: MAP (model- and acceleration-based pursuit)')
 
+        # ── head-to-head behavior (ForzaETH GB_TRACK/TRAILING/OVERTAKE) ───────
+        # Off by default: with enable_behavior false NONE of this runs and the
+        # solo control path is bit-identical to before.
+        self.behavior = None
+        if bool(self.get_parameter('enable_behavior').value):
+            gm = None
+            myaml = self.get_parameter('map_yaml').value or map_path_for(rl)
+            if myaml and os.path.exists(myaml):
+                try:
+                    gm = GridMap.load(myaml)
+                except Exception as e:                  # map is optional here
+                    self.get_logger().warning(f'behavior map check off: {e}')
+            self.behavior = RaceBehavior(
+                (self.rl_x, self.rl_y, self.rl_speed),
+                trail_range=float(self.get_parameter('trail_range').value),
+                clear_margin=float(self.get_parameter('clear_margin').value),
+                evasion_dist=float(self.get_parameter('evasion_dist').value),
+                v_max=self.v_max, grid_map=gm)
+            self._opp = None                            # (s, d) latest opponent
+            self._opp_t = None                          # wall time of last fix
+            self._opp_vs = 0.0                          # EMA of opponent v_s
+            self._opp_timeout = float(self.get_parameter('opp_timeout').value)
+            opp_topic = self.get_parameter('opponent_topic').value
+            self.create_subscription(PoseArray, opp_topic, self._opp_cb, 10)
+            self.get_logger().info(
+                f'head-to-head behavior ON — opponents from {opp_topic}'
+                f'{" (map room-check)" if gm is not None else ""}')
+
         # ── traction governor (IMU; inert until imu_topic is set) ─────────────
         self.governor = TractionGovernor(
             max_lat_accel=float(self.get_parameter('max_lat_accel').value))
@@ -225,6 +268,20 @@ class RacelineMPC(Node):
     def _scale_cb(self, m):
         self.sup_scale = float(np.clip(m.data, 0.0, 1.0))
 
+    def _opp_cb(self, m):
+        """World-frame PoseArray of detected opponents -> nearest, in Frenet."""
+        if not m.poses or self.behavior is None:
+            return
+        p = min(m.poses, key=lambda q: (q.position.x - self.x) ** 2
+                                       + (q.position.y - self.y) ** 2)
+        t = self.get_clock().now().nanoseconds * 1e-9
+        s, d = self.behavior.to_frenet(p.position.x, p.position.y)
+        if self._opp is not None and self._opp_t is not None and t > self._opp_t:
+            v = self.behavior.wrap(s - self._opp[0]) / max(t - self._opp_t, 1e-3)
+            if abs(v) < 15.0:                           # gate teleports/ID swaps
+                self._opp_vs = 0.6 * self._opp_vs + 0.4 * v
+        self._opp, self._opp_t = (s, d), t
+
     # ── emergency brake: min range in a narrow forward cone ────────────────────
     def _forward_clear(self):
         s = self.scan
@@ -250,6 +307,34 @@ class RacelineMPC(Node):
                 px, py, pyaw, pv, self._last_cmd[0], self._last_cmd[1],
                 self.delay, self.L)
         self.nearest = find_nearest(px, py, self.rl_x, self.rl_y, self.nearest)
+
+        # head-to-head behavior: pick the line to track + a speed cap
+        speed_cap = None
+        if self.behavior is not None:
+            now = self.get_clock().now().nanoseconds * 1e-9
+            opp = None
+            if self._opp is not None and self._opp_t is not None \
+                    and now - self._opp_t < self._opp_timeout:
+                opp = (self._opp[0], self._opp[1], self._opp_vs)
+            prev_state = self.behavior.state
+            out = self.behavior.update(
+                px, py, pv, self.nearest, opp,
+                dt=1.0 / float(self.get_parameter('control_hz').value))
+            if out['line_changed']:
+                bx, by, bv = out['line']
+                if bx is self.rl_x:                     # rejoined: exact arrays
+                    hdg, curv = self.rl_hdg, self.rl_curv
+                else:
+                    hdg, curv = heading_curvature(bx, by)
+                if self.mpc.available:
+                    self.mpc.set_raceline(bx, by, hdg, curv, bv)
+                self.map_ctl.set_raceline(bx, by, bv, curvature=curv)
+            speed_cap = out['speed_cap']
+            if out['state'] != prev_state:
+                self.get_logger().info(
+                    f"behavior: {prev_state} -> {out['state']}"
+                    f" (gap={out['gap'] if out['gap'] is None else round(out['gap'], 2)}"
+                    f" side={out['side']})")
 
         steer = v_cmd = None
         if self.mpc.available:
@@ -277,6 +362,10 @@ class RacelineMPC(Node):
                 self.get_logger().warning('AEB — obstacle ahead, stopping')
         else:
             v_cmd = max(v_cmd, self.min_speed)
+            # TRAILING cap may sit below the creep floor — the gap controller
+            # must be allowed to match a slow opponent rather than climb it.
+            if speed_cap is not None and speed_cap < v_cmd:
+                v_cmd = max(0.0, float(speed_cap))
 
         msg = AckermannDriveStamped()
         msg.drive.steering_angle = float(np.clip(steer, -self.max_steer, self.max_steer))
