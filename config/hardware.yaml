@@ -63,7 +63,11 @@ raceline_mpc:
     odom_topic: '/pf/pose/odom' # map-frame pose from your localization
     drive_topic: '/drive'
     imu_topic: '/oakd/imu'      # enables the traction governor
-    max_lat_accel: 6.0          # m/s^2 grip budget for the governor
+    max_lat_accel: 6.0          # m/s^2 grip budget (governor + profiler)
     aeb_decel: 6.0              # m/s^2 assumed braking for dynamic AEB range
+    reprofile_speeds: true      # friction-limited speeds from curvature at load
+    profile_a_accel: 4.0        # m/s^2 engine limit
+    profile_a_brake: 8.0        # m/s^2 braking limit
+    profile_v_max: 8.0          # m/s profile ceiling
     v_scale: 0.5                # global speed cap — raise as confidence grows
     control_hz: 50.0

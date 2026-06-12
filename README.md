@@ -27,11 +27,17 @@ map ─► slam_toolbox ─► raceline_optimizer ─► raceline_mpc (MPC + AEB
 2. **Optimize** a raceline: `raceline_optimizer` / `track_learner` produce
    `racelines/*.csv` (x, y, heading, curvature, speed); inspect with
    `tools/draw_raceline.py`.
-3. **Race**: `raceline_mpc` tracks the line with a kinematic LTV-MPC
-   (persistent warm-started OSQP solve, ~0.6 ms/tick), falls back to pure
-   pursuit on any solver hiccup, brakes for obstacles with a speed-aware AEB,
-   and scales speed when the IMU says grip is running out — see
-   [docs/mpc.md](docs/mpc.md).
+3. **Profile** the speeds: `tools/reprofile_raceline.py` (or
+   `reprofile_speeds: true` at runtime) replaces the speed column with the
+   TUMFTM friction-limited forward-backward profile, so commanded speeds
+   provably fit the grip budget — see
+   [docs/racing_tech.md](docs/racing_tech.md).
+4. **Race**: `raceline_mpc` tracks the line with a kinematic LTV-MPC
+   (persistent warm-started OSQP solve, ~0.6 ms/tick), falls back to the
+   MAP controller (Becker et al., ICRA 2023 — tire-aware pursuit) on any
+   solver hiccup, brakes for obstacles with a speed-aware AEB, and scales
+   speed when the IMU says grip is running out — see
+   [docs/mpc.md](docs/mpc.md) and [docs/racing_tech.md](docs/racing_tech.md).
 
 Racing nodes: `raceline_mpc` (competition time-trial), `race_agent` /
 `racing_agent` (full strategy + opponents), `opponent_driver`,
