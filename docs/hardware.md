@@ -85,6 +85,21 @@ Nothing else changes; `backend: auto` finds the PCA9685, or pin
   odometry — expect a coarser estimate). `erpm_gain`, `serial_port`, and
   `telemetry_hz` are simply unused.
 
+### Measured calibration (recommended over hand-tuning)
+
+Log a short drive and let the fitters produce the numbers:
+
+```bash
+ros2 run f1tenth_gym_ros data_logger --ros-args -p out:=/tmp/run1.csv
+# drive ~30 s: gentle S-turns (delay), straights (trim), steady laps (gain)
+python3 tools/sysid_report.py /tmp/run1.csv
+```
+
+It prints `actuation_delay` (steering↔yaw-rate cross-correlation, with a
+correlation-quality gate), an `erpm_gain` correction factor (wheel vs PF
+speed), and `steer_trim_us` (straight-commanded yaw drift) — paste them
+into `config/hardware.yaml`.
+
 **First-drive calibration order** (in `config/hardware.yaml`):
 `steer_invert`/`steer_trim_us` until it drives straight → `max_steer` against
 real wheel angle → `max_speed`/`erpm_gain` against measured speed → raise
