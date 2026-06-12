@@ -51,6 +51,7 @@ from pursuit_agent import find_best_raceline, load_raceline, find_nearest
 from mpc_controller import KinematicMPC, TractionGovernor, predict_state
 from map_controller import MAPController
 from velocity_profiler import velocity_profile, segment_lengths
+from raceline_refiner import refine_raceline
 
 
 class RacelineMPC(Node):
@@ -73,6 +74,7 @@ class RacelineMPC(Node):
         self.declare_parameter('imu_topic', '')         # e.g. /oakd/imu; '' = off (sim)
         self.declare_parameter('max_lat_accel', 6.0)    # m/s^2 traction-governor limit
         self.declare_parameter('actuation_delay', 0.0)  # s sensor->actuator latency
+        self.declare_parameter('refine_corridor', 0.0)  # m min-curvature refinement
         self.declare_parameter('reprofile_speeds', False)  # recompute CSV speeds
         self.declare_parameter('profile_a_accel', 4.0)  # m/s^2 engine limit
         self.declare_parameter('profile_a_brake', 8.0)  # m/s^2 braking limit
@@ -97,6 +99,14 @@ class RacelineMPC(Node):
             raise FileNotFoundError('no raceline')
         self.rl_x, self.rl_y, self.rl_hdg, self.rl_curv, self.rl_speed = load_raceline(rl)
         self.n = len(self.rl_x)
+        corridor = float(self.get_parameter('refine_corridor').value)
+        if corridor > 0.0:
+            # minimum-curvature refinement (TUMFTM) within +/- corridor of the
+            # loaded line — validate wall clearance before enabling on a car
+            self.rl_x, self.rl_y, self.rl_hdg, self.rl_curv = refine_raceline(
+                self.rl_x, self.rl_y, corridor=corridor)
+            self.get_logger().info(
+                f'raceline refined (min-curvature, corridor {corridor:.2f} m)')
         if self.get_parameter('reprofile_speeds').value:
             # friction-limited forward-backward profile (TUMFTM) — replaces the
             # CSV speed column with one that provably fits the grip budget
@@ -128,7 +138,8 @@ class RacelineMPC(Node):
 
         # ── MAP fallback (Becker et al., ICRA 2023) — replaces pure pursuit ───
         self.map_ctl = MAPController(wheelbase=self.L, max_steer=self.max_steer)
-        self.map_ctl.set_raceline(self.rl_x, self.rl_y, self.rl_speed)
+        self.map_ctl.set_raceline(self.rl_x, self.rl_y, self.rl_speed,
+                                  curvature=self.rl_curv)
         self.get_logger().info('fallback: MAP (model- and acceleration-based pursuit)')
 
         # ── traction governor (IMU; inert until imu_topic is set) ─────────────
