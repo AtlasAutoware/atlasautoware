@@ -103,6 +103,15 @@ sidewalk_follow:
     v_cruise: 1.2               # m/s — walking pace, SUPERVISED use only
     aeb_dist: 0.8
 
+particle_filter:
+  ros__parameters:
+    map_yaml: ''                # '' = auto-find; the frozen SLAM map
+    scan_topic: '/scan'
+    ekf_odom_topic: '/ekf/odom' # velocity EKF twist = motion prior
+    out_topic: '/pf/pose/odom'  # what raceline_mpc/navigator localize on
+    n_particles: 1500
+    subsample: 20               # every Nth beam (1.3 ms/update at 18 beams)
+
 raceline_mpc:
   ros__parameters:
     scan_topic: '/scan'

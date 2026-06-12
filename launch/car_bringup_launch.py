@@ -58,6 +58,20 @@ def generate_launch_description():
     ))
     ld.add_action(Node(
         package='f1tenth_gym_ros',
+        executable='particle_filter',
+        name='particle_filter',
+        parameters=[config],
+        condition=IfCondition(LaunchConfiguration('use_racing')),
+    ))
+    ld.add_action(Node(
+        package='f1tenth_gym_ros',
+        executable='rc_monitor',
+        name='rc_monitor',
+        parameters=[config],
+        condition=IfCondition(LaunchConfiguration('use_drive')),
+    ))
+    ld.add_action(Node(
+        package='f1tenth_gym_ros',
         executable='raceline_mpc',
         name='raceline_mpc',
         parameters=[config],
