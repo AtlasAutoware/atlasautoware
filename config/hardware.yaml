@@ -64,6 +64,17 @@ oakd_camera:
     imu_topic: '/oakd/imu'
     camera_frame: 'oakd_rgb'
     imu_frame: 'oakd_imu'
+    yolo_blob: ''               # compiled .blob -> YOLO on the camera's VPU
+    yolo_conf: 0.4              # (blobconverter from the trained ONNX)
+    yolo_size: 416
+
+camera_perception:
+  ros__parameters:
+    image_topic: '/oakd/rgb'
+    odom_topic: '/pf/pose/odom'
+    backend: 'auto'             # auto | tensorrt | cuda | cpu — auto prefers a
+                                # .engine built on the Jetson (trtexec --fp16),
+                                # then cv2.dnn CUDA, then CPU
 
 raceline_mpc:
   ros__parameters:

@@ -1,4 +1,4 @@
-# AtlasAutoware: An Integrated, CPU-Only Autonomous Racing Stack for 1/10-Scale Vehicles with Component-Wise Closed-Loop Evaluation
+# AtlasAutoware: An Integrated Autonomous Racing Stack for 1/10-Scale Vehicles with GPU-Accelerated Perception and Component-Wise Closed-Loop Evaluation
 
 **Author:** Eshan Iyer
 **Affiliation:** Thomas Jefferson High School for Science and Technology (TJHSST), Alexandria, VA
@@ -10,20 +10,26 @@
 ## Abstract
 
 We present AtlasAutoware, an integrated software stack for 1/10-scale
-autonomous racing (F1TENTH/RoboRacer class) that runs entirely on CPU in
-Python/numpy and is designed for simulation-to-hardware parity: the same
-control, planning, and safety nodes drive both the F1TENTH gym simulator and
-a physical car built from commodity hardware (NVIDIA Jetson, OAK-D Pro
-camera with integrated IMU, Slamtec RPLidar, VESC motor controller). The
-stack combines a linear-time-varying model-predictive raceline tracker with
-a persistent warm-started quadratic-program formulation (0.6 ms mean solve
-time, a 2.3× reduction over per-tick problem construction), a tire-aware
-Model- and Acceleration-based Pursuit (MAP) fallback controller,
+autonomous racing (F1TENTH/RoboRacer class) designed for
+simulation-to-hardware parity: the same control, planning, and safety nodes
+drive both the F1TENTH gym simulator and a physical car built from commodity
+hardware (NVIDIA Jetson, OAK-D Pro camera with integrated IMU, Slamtec
+RPLidar, VESC motor controller). Compute is partitioned deliberately: the
+real-time control and planning path runs on CPU in Python/numpy — its
+quadratic programs are too small to benefit from offload — while neural
+perception is accelerated, with three interchangeable inference paths
+(a TensorRT FP16 engine on the Jetson GPU, OpenCV's CUDA DNN backend, or
+fully on-camera inference on the OAK-D's Myriad X VPU at zero host cost).
+The stack combines a linear-time-varying model-predictive raceline tracker
+with a persistent warm-started quadratic-program formulation (0.6 ms mean
+solve time, a 2.3× reduction over per-tick problem construction), a
+tire-aware Model- and Acceleration-based Pursuit (MAP) fallback controller,
 minimum-curvature raceline refinement, friction-ellipse-coupled velocity
-profiling, IMU-based traction governance, actuation-latency compensation,
-and a Frenet-frame overtaking planner. A hardware abstraction layer
-auto-detects the available actuation path (I2C PWM bridge into the motor
-controller's RC input, or direct UART) at startup. Each component was
+profiling, IMU-based traction governance, slip-rejecting velocity
+estimation, lidar motion de-skew, actuation-latency compensation, and a
+Frenet-frame overtaking planner. A hardware abstraction layer auto-detects
+the available actuation path (I2C PWM bridge into the motor controller's RC
+input, or direct UART) at startup. Each component was
 evaluated independently against a shared deterministic closed-loop
 benchmark; we report component-wise results, including a 9% lap-time
 reduction from raceline refinement (43.76 s → 39.78 s), a 37% reduction in
@@ -56,10 +62,14 @@ cars still run geometric followers with hand-tuned speed tables.
 This paper describes AtlasAutoware, a stack built to close that gap under
 three constraints:
 
-1. **CPU-only, interpreted-language budget.** Every runtime component is
-   pure Python/numpy (plus the OSQP solver [5]); the full control path
-   consumes about 3% of a 50 Hz budget on commodity hardware. There is no
-   training pipeline and no GPU dependency anywhere in the control loop.
+1. **Compute partitioned by what actually benefits.** The real-time control
+   and planning path is pure Python/numpy (plus the OSQP solver [5]) on CPU
+   and consumes about 3% of a 50 Hz budget — its QPs are far too small for
+   GPU offload to help. Neural perception, the genuinely parallel workload,
+   runs on whatever accelerator is present: a TensorRT FP16 engine on the
+   Jetson GPU, OpenCV's CUDA backend, or entirely on the camera's Myriad X
+   VPU, selected automatically at startup with a CPU fallback. No GPU is
+   *required* anywhere, and the control loop never depends on one.
 2. **Simulation-to-hardware parity.** The hardware drivers publish the same
    message shapes the simulator does, so every algorithm runs unmodified on
    both. Hardware specifics (actuation path, latency, steering trim, grip
@@ -293,6 +303,33 @@ $d'=0$) guarantee smooth rejoin. The output is a full same-indexing
 deformed raceline, so any tracker consumes it unchanged; the spline is
 re-planned per step against moving opponents.
 
+### 4.10 Accelerated perception
+
+Opponent detection (a YOLOv8 model trained on car imagery) is the one
+genuinely parallel workload in the stack, and the only component that
+touches an accelerator. Three interchangeable inference paths share one
+output parser and back-projection geometry, selected by a `backend`
+parameter with automatic fallback:
+
+1. **TensorRT (Jetson GPU).** The ONNX model is compiled once on the target
+   device (`trtexec --onnx=... --saveEngine=... --fp16`) and executed at
+   FP16 through a thin runtime wrapper (page-locked host buffers,
+   asynchronous device copies, one execution stream). `backend: auto`
+   prefers an `.engine` file found beside the configured model.
+2. **OpenCV CUDA DNN.** The same ONNX through `cv2.dnn` with the CUDA FP16
+   target, for Jetson images with CUDA-enabled OpenCV but no TensorRT
+   Python bindings.
+3. **On-camera VPU.** The OAK-D Pro's Myriad X runs the detector *inside
+   the camera* (depthai `YoloDetectionNetwork`, fed by an on-device
+   planar-format converter); the host receives only detection boxes, which
+   the camera node back-projects to relative opponent positions using the
+   factory intrinsics. Host CPU and GPU cost is zero, freeing the Jetson's
+   GPU entirely — at the cost of running a smaller (e.g. 416×416) model.
+
+The control loop deliberately stays on CPU: profiling the persistent-QP
+solve at 0.6 ms (§6.1) shows the 76-variable problem is dominated by
+fixed overheads that GPU offload would add to, not remove.
+
 ## 5. Experimental Setup
 
 All closed-loop results use one shared, deterministic benchmark harness: a
@@ -345,6 +382,14 @@ MAP halves the fallback's worst-case error relative to pure pursuit; the
 kinematic plant (no tire slip) understates MAP's advantage, which is
 precisely tire-slip compensation.
 
+![Figure 1: closed-loop simulation overview — raceline with friction-limited speeds; controller cross-track comparison; speed profiles; lateral-acceleration demand vs. grip budget](figures/sim_comparison.png)
+
+**Figure 1.** Closed-loop simulation overview: raceline with friction-limited
+speeds (top left); cross-track error around the lap for the three
+controllers (top right); speed profiles (bottom left); and the
+lateral-acceleration demand of each speed profile against the 6 m/s² grip
+budget (bottom right).
+
 ### 6.3 Velocity profile feasibility
 
 The hand-tuned CSV speed column demands more than the 6 m/s² lateral
@@ -369,7 +414,16 @@ MAP controller:
 A **9% lap-time reduction** at the conservative default corridor, with
 tracking error *improving* simultaneously; the gain is monotone in the
 corridor, making it a clean safety/pace knob. Profiler estimates agree
-with closed-loop laps within 0.5 s, confirming the gain is geometric.
+with closed-loop laps within 0.5 s, confirming the gain is geometric
+(Fig. 2: the refinement clips the curvature spikes — max |κ| 2.53 → 1.04
+m⁻¹ — which is exactly where the friction-limited profile was forced to
+slow down).
+
+![Figure 2: minimum-curvature refinement — geometry, curvature, and resulting speed profiles](figures/raceline_refinement.png)
+
+**Figure 2.** Minimum-curvature refinement at the 0.25 m corridor: raceline
+geometry (left), curvature along the lap (center), and the friction-limited
+speed profiles that produce the 3.98 s closed-loop gain (right).
 
 ### 6.5 Curvature-aware lookahead
 
@@ -402,7 +456,13 @@ tracking to its zero-delay level (0.340 m) and recovers the MPC from severe
 degradation (the receding-horizon tracker is markedly more
 delay-sensitive than the geometric one). At 60 ms, effects are within
 noise — the uncompensated MPC's faster lap there results from
-delay-induced corner-cutting, not better control.
+delay-induced corner-cutting, not better control. Figure 3 summarizes.
+
+![Figure 3: actuation-latency compensation under injected actuator delay](figures/delay_compensation.png)
+
+**Figure 3.** Worst-case tracking (MAP, left) and lap time (MPC, right)
+under 60/100/140 ms injected actuator delay, with and without
+forward-prediction compensation, against the zero-delay references (dashed).
 
 ### 6.7 Overtaking
 
@@ -435,11 +495,18 @@ kinematically consistent cornering):
 
 Slip detection: 100% of slipping samples flagged, 0.2% false-positive rate
 on clean segments. Notably, the *ungated* EKF is barely better than raw
-wheel during slip — quantifying that the gating, not the fusion, carries
-the value. De-skew restores a scan synthesized from a sensor moving at
-7 m/s and 2.3 rad/s (per-beam honest raycast) to its static-pose geometry
-exactly (wall-distance RMS 0.307 m → numerically zero); these are
-open-loop, synthetic-truth validations rather than closed-loop lap results.
+wheel during slip (Fig. 4: it visibly rides the slipping wheel signal) —
+quantifying that the gating, not the fusion, carries the value. De-skew
+restores a scan synthesized from a sensor moving at 7 m/s and 2.3 rad/s
+(per-beam honest raycast) to its static-pose geometry exactly
+(wall-distance RMS 0.307 m → numerically zero); these are open-loop,
+synthetic-truth validations rather than closed-loop lap results.
+
+![Figure 4: velocity estimation through wheel-slip pulses](figures/ekf_slip_rejection.png)
+
+**Figure 4.** Velocity estimation through two 25% wheel-slip pulses (shaded):
+the ungated EKF follows the slipping wheel almost exactly, while the
+anchored slip gate coasts on the IMU and tracks the true speed.
 
 ## 7. Discussion and Limitations
 
@@ -462,10 +529,14 @@ hardware layer is unit-tested against protocol and register-level
 specifications, and all parameters (latency, trim, ERPM gain, grip budget)
 are exposed for the calibration procedure documented in the repository, but
 on-car lap results are future work and a precondition for any claims
-transferring to hardware. (iii) The refiner assumes the input line's wall
-clearance; integrating occupancy-grid clearance checks is mechanical but
-not yet done. (iv) The overtaker chooses sides from curvature only; the
-ForzaETH original consults measured per-side track width [2].
+transferring to hardware. (iii) The accelerated perception paths (TensorRT,
+cv2-CUDA, on-camera VPU) are implemented and selected automatically, but
+their throughput has not yet been benchmarked on a physical Jetson/OAK-D —
+we report no GPU timing numbers rather than estimate them. (iv) The refiner
+assumes the input line's wall clearance; integrating occupancy-grid
+clearance checks is mechanical but not yet done. (v) The overtaker chooses
+sides from curvature only; the ForzaETH original consults measured per-side
+track width [2].
 
 **Future work.** On-vehicle validation; a particle filter on a frozen map
 for race-time localization [6], consuming the velocity EKF of §4.8 as its
@@ -477,10 +548,12 @@ opponent-trajectory prediction for the overtaker [7].
 AtlasAutoware demonstrates that the published state of the art in
 small-scale autonomous racing — MPC tracking, tire-aware geometric control,
 minimum-curvature trajectory optimization, friction-limited profiling,
-latency compensation, and Frenet-frame overtaking — fits in a single
-CPU-only, pip-installable, hardware-adaptive stack, and that each
-component's contribution can be isolated and measured on a shared
-closed-loop benchmark. The measured component gains (9% lap time from
+slip-rejecting state estimation, latency compensation, and Frenet-frame
+overtaking — fits in a single pip-installable, hardware-adaptive stack
+whose real-time path needs only a CPU and whose perception exploits
+whatever accelerator the platform offers, and that each component's
+contribution can be isolated and measured on a shared closed-loop
+benchmark. The measured component gains (9% lap time from
 trajectory refinement; 37% tracking error from lookahead scheduling; full
 recovery of tracking under 100 ms actuation delay; DNF-to-overtake
 capability for 0.30 s) compose into a system whose degraded modes are
@@ -533,13 +606,10 @@ github.com/TUMFTM.
 
 ## Appendix A: Figures
 
-**Figure 1** (`figures/sim_comparison.png`): closed-loop simulation
-overview — raceline with friction-limited speeds; controller cross-track
-comparison; speed profiles; lateral-acceleration demand vs. grip budget.
-
-**Figure 2** (`figures/delay_compensation.png`): worst-case tracking (MAP)
-and lap time (MPC) under 60/100/140 ms injected actuator delay, with and
-without forward-prediction compensation, against zero-delay references.
+All four figures are embedded inline (§6.2, §6.4, §6.6, §6.8) and generated
+from the repository's own benchmark code; sources live in
+`docs/paper/figures/` (`sim_comparison.png`, `raceline_refinement.png`,
+`delay_compensation.png`, `ekf_slip_rejection.png`).
 
 ## Appendix B: Reproduction
 

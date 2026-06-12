@@ -1,8 +1,11 @@
 # Racing tech — what's implemented and where it comes from
 
 The control stack adopts the techniques the winning F1TENTH/RoboRacer teams
-(ForzaETH / ETH Zurich PBL, TUM) published in 2023–2025, implemented in pure
-numpy so everything runs in microseconds-to-milliseconds on the Jetson CPU.
+(ForzaETH / ETH Zurich PBL, TUM) published in 2023–2025. Compute is split by
+what benefits: control/planning run in pure numpy on CPU
+(microseconds-to-milliseconds per tick), while neural perception uses the
+Jetson's GPU or the OAK-D's onboard VPU — see "GPU-accelerated perception"
+below.
 
 ## MAP controller (`f1tenth_gym_ros/map_controller.py`)
 
@@ -74,6 +77,26 @@ governor (live, IMU) and the profiler (planned, curvature) now share one
   beam by the EKF twist times the beam's age (exact on synthetic truth:
   wall-distance RMS 0.31 m → 0.00). Wired into `rplidar_node` via
   `deskew_odom_topic`.
+
+## GPU-accelerated perception (`camera_perception.py`, `oakd_camera.py`)
+
+YOLO opponent detection picks the fastest available backend at startup
+(`backend: auto` in `config/hardware.yaml`):
+
+1. **TensorRT (Jetson GPU, preferred)** — build the engine once on the car:
+   `trtexec --onnx=models/car_yolov8.onnx --saveEngine=models/car_yolov8.engine --fp16`
+   (engines are device-specific; rebuild after JetPack upgrades). `auto`
+   picks up the `.engine` automatically.
+2. **cv2.dnn CUDA** — the ONNX through OpenCV's CUDA FP16 target (Jetson
+   OpenCV builds ship CUDA-enabled).
+3. **CPU** — always-works fallback.
+
+Alternatively set `yolo_blob` in the `oakd_camera` section to run the
+detector **on the camera's Myriad X VPU** (convert the ONNX with
+`blobconverter`, e.g. 416×416): the host receives only boxes, back-projected
+to relative opponent poses on `/oakd/opponents_rel`, costing the Jetson
+nothing. The control loop stays on CPU deliberately — a 76-variable QP at
+0.6 ms gains nothing from offload.
 
 ## Adopted-next candidates (researched, not yet implemented)
 

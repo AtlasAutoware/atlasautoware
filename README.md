@@ -97,6 +97,9 @@ Calibration (steering trim, `erpm_gain`, speed scaling) lives in
 `config/hardware.yaml`. Wiring, VESC Tool setup, and the first-drive
 calibration order are in [docs/hardware.md](docs/hardware.md). Both actuation
 paths carry an arming hold, a command watchdog, and neutral-on-shutdown.
+YOLO opponent detection auto-selects its accelerator — TensorRT on the
+Jetson GPU, cv2-CUDA, the OAK-D's onboard VPU, or CPU fallback — see
+[docs/racing_tech.md](docs/racing_tech.md).
 
 ## Configuration
 

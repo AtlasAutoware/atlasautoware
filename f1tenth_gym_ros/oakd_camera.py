@@ -8,6 +8,10 @@ works on Foxy — no depthai-ros packages needed on the Jetson):
   /oakd/rgb          sensor_msgs/Image  (bgr8)   -> camera_perception YOLO
   /oakd/camera_info  sensor_msgs/CameraInfo      -> pinhole back-projection
   /oakd/imu          sensor_msgs/Imu (accel+gyro)-> raceline_mpc traction governor
+  /oakd/opponents_rel PoseArray (optional)       -> on-device VPU YOLO: set
+                     `yolo_blob` to a compiled .blob and detection runs on the
+                     camera's Myriad X — zero host CPU/GPU cost, boxes
+                     back-projected to (x fwd, y left) with the factory fx
 
 Design notes:
   - The RGB preview stream is configured interleaved-BGR at the requested size
@@ -32,8 +36,10 @@ except Exception:                       # pragma: no cover — not on dev machin
     dai = None
 
 
-def build_pipeline(width, height, fps, imu_hz):
-    """depthai pipeline: RGB preview (interleaved BGR) + raw accel/gyro IMU."""
+def build_pipeline(width, height, fps, imu_hz, yolo_blob='', yolo_conf=0.4,
+                   yolo_size=416):
+    """depthai pipeline: RGB preview (interleaved BGR) + raw accel/gyro IMU,
+    plus optional on-device YOLO on the Myriad X VPU when `yolo_blob` set."""
     pipeline = dai.Pipeline()
 
     cam = pipeline.create(dai.node.ColorCamera)
@@ -46,6 +52,26 @@ def build_pipeline(width, height, fps, imu_hz):
     xout_rgb = pipeline.create(dai.node.XLinkOut)
     xout_rgb.setStreamName('rgb')
     cam.preview.link(xout_rgb.input)
+
+    if yolo_blob:
+        # NN wants planar input at its own size: convert on-device, then run
+        # the detector entirely on the camera's VPU (no host involvement)
+        manip = pipeline.create(dai.node.ImageManip)
+        manip.initialConfig.setResize(int(yolo_size), int(yolo_size))
+        manip.initialConfig.setFrameType(dai.ImgFrame.Type.BGR888p)
+        manip.setMaxOutputFrameSize(int(yolo_size) * int(yolo_size) * 3)
+        cam.preview.link(manip.inputImage)
+        nn = pipeline.create(dai.node.YoloDetectionNetwork)
+        nn.setBlobPath(yolo_blob)
+        nn.setConfidenceThreshold(float(yolo_conf))
+        nn.setNumClasses(1)                       # car detector
+        nn.setCoordinateSize(4)
+        nn.setIouThreshold(0.45)
+        nn.input.setBlocking(False)
+        manip.out.link(nn.input)
+        xout_det = pipeline.create(dai.node.XLinkOut)
+        xout_det.setStreamName('det')
+        nn.out.link(xout_det.input)
 
     imu = pipeline.create(dai.node.IMU)
     imu.enableIMUSensor(
@@ -64,6 +90,7 @@ def _make_node():
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import Image, CameraInfo, Imu
+    from geometry_msgs.msg import PoseArray, Pose
 
     class OakDCamera(Node):
         def __init__(self):
@@ -77,10 +104,15 @@ def _make_node():
             self.declare_parameter('imu_topic', '/oakd/imu')
             self.declare_parameter('camera_frame', 'oakd_rgb')
             self.declare_parameter('imu_frame', 'oakd_imu')
+            self.declare_parameter('yolo_blob', '')    # on-device VPU detector
+            self.declare_parameter('yolo_conf', 0.4)
+            self.declare_parameter('yolo_size', 416)
+            self.declare_parameter('car_width', 0.30)  # m, for back-projection
             p = lambda n: self.get_parameter(n).value   # noqa: E731
             self.w, self.h = int(p('width')), int(p('height'))
             self.cam_frame = p('camera_frame')
             self.imu_frame = p('imu_frame')
+            self.car_w = float(p('car_width'))
 
             if dai is None:
                 raise RuntimeError('depthai not installed — pip3 install depthai')
@@ -91,11 +123,22 @@ def _make_node():
             self.pub_imu = self.create_publisher(Imu, p('imu_topic'),
                                                  QoSProfile(depth=50))
 
-            self.device = dai.Device(
-                build_pipeline(self.w, self.h, p('fps'), p('imu_hz')))
+            self.device = dai.Device(build_pipeline(
+                self.w, self.h, p('fps'), p('imu_hz'),
+                yolo_blob=p('yolo_blob'), yolo_conf=float(p('yolo_conf')),
+                yolo_size=int(p('yolo_size'))))
             self.q_rgb = self.device.getOutputQueue('rgb', maxSize=2, blocking=False)
             self.q_imu = self.device.getOutputQueue('imu', maxSize=50, blocking=False)
             self.info = self._camera_info()
+            self.q_det = None
+            if p('yolo_blob'):
+                self.q_det = self.device.getOutputQueue('det', maxSize=2,
+                                                        blocking=False)
+                self.pub_det = self.create_publisher(
+                    PoseArray, '/oakd/opponents_rel', qos)
+                self.create_timer(1.0 / (2.0 * float(p('fps'))), self._poll_det)
+                self.get_logger().info(
+                    'on-device YOLO active (Myriad X VPU) -> /oakd/opponents_rel')
             self.create_timer(1.0 / (2.0 * float(p('fps'))), self._poll_rgb)
             self.create_timer(0.002, self._poll_imu)
             self.get_logger().info(
@@ -137,6 +180,32 @@ def _make_node():
             self.pub_rgb.publish(msg)
             self.info.header.stamp = stamp
             self.pub_info.publish(self.info)
+
+        def _poll_det(self):
+            """On-device detections -> relative poses (x fwd, y left, base frame).
+
+            Same pinhole back-projection camera_perception uses: depth from
+            the known car width and the factory fx, scaled to preview size.
+            """
+            det = self.q_det.tryGet()
+            if det is None:
+                return
+            fx = self.info.k[0] if self.info.k[0] else 600.0
+            cx = self.info.k[2] if self.info.k[2] else self.w / 2.0
+            pa = PoseArray()
+            pa.header.stamp = self.get_clock().now().to_msg()
+            pa.header.frame_id = self.cam_frame
+            for d in det.detections:
+                w_px = max((d.xmax - d.xmin) * self.w, 1.0)
+                u_center = (d.xmin + d.xmax) / 2.0 * self.w
+                depth = self.car_w * fx / w_px
+                y_left = -(u_center - cx) * depth / fx
+                pose = Pose()
+                pose.position.x = float(depth)
+                pose.position.y = float(y_left)
+                pose.orientation.w = float(d.confidence)
+                pa.poses.append(pose)
+            self.pub_det.publish(pa)
 
         def _poll_imu(self):
             data = self.q_imu.tryGet()
