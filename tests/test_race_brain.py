@@ -159,6 +159,31 @@ def test_strategist():
     check('alongside & quicker -> ATTACK (complete pass)', d.mode == 'ATTACK')
     check('complete-pass keeps speed up', d.speed_factor >= 1.0)
 
+    # REGRESSION: EVADE must move AWAY from a passing car even when a pass
+    # side was committed earlier (a stale commit used to steer INTO them).
+    s = RaceStrategist()
+    d = s.decide(ego_idx, 6.0, rlx, rly, rls, 1.0, 1.0,
+                 [opp_at(5, lateral=-0.4)])              # opp right -> commit LEFT
+    check('pass committed left', d.mode == 'ATTACK' and s.commit_side == 1)
+    passer = opp_at(1, lateral=0.3, vx=-50.0, vy=50.0)   # now alongside on LEFT
+    d = s.decide(ego_idx, 2.0, rlx, rly, rls, 1.0, 1.0, [passer])
+    check('passed-while-committed -> EVADE', d.mode == 'EVADE')
+    check('EVADE moves away (right), not into the passer', d.offset < 0.0)
+    check('EVADE clears the stale committed side', s.commit_side == 0)
+
+    # REGRESSION: lateral offsets are clamped by the wall on THEIR side
+    # (+left offsets by room_left); the bounds used to be swapped.
+    s = RaceStrategist()
+    d = s.decide(ego_idx, 5.0, rlx, rly, rls, 0.1, 2.0,  # left wall 0.1 m away
+                 [opp_at(n - 4, lateral=0.3)])           # DEFEND covers the left
+    check('DEFEND clamped by the left wall', d.mode == 'DEFEND'
+          and 0.0 < d.offset <= 0.1 + 1e-9)
+    s = RaceStrategist()
+    fast = opp_at(1, lateral=0.3, vx=-50.0, vy=50.0)     # EVADE right
+    d = s.decide(ego_idx, 2.0, rlx, rly, rls, 2.0, 0.05, [fast])
+    check('EVADE clamped by the right wall', d.mode == 'EVADE'
+          and -0.05 - 1e-9 <= d.offset < 0.0)
+
 
 if __name__ == '__main__':
     test_tracker()

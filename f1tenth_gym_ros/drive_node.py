@@ -97,8 +97,14 @@ class VescSerialBackend:
         frac = max(-1.0, min(1.0, float(steer) / float(c['max_steer'])))
         if c['steer_invert']:
             frac = -frac
-        # trim expressed in pulse us for parity with the PCA path: ~1000us span
-        pos = 0.5 + 0.5 * frac + float(c['steer_trim_us']) / 1000.0
+        # Mirror the PCA9685 pulse map (centre + trim + frac·half-range) on the
+        # VESC's [0, 1] servo scale, treating it as a 1000 us span.  Using the
+        # configured half-range — not the full ±0.5 span — leaves headroom so
+        # trim shifts the centre instead of clipping one side's full lock
+        # (the old `0.5 + 0.5·frac + trim` saturated full-left whenever
+        # trim > 0, giving asymmetric steering on the UART backend only).
+        pos = 0.5 + (float(c['steer_trim_us'])
+                     + frac * float(c['steer_half_range_us'])) / 1000.0
         self.ser.write(vp.pkt_set_servo_pos(pos))
 
     def neutral(self):
@@ -229,7 +235,9 @@ def _make_node():
             self.timeout = float(self.get_parameter('cmd_timeout').value)
             self.arm_until = time.monotonic() + \
                 float(self.get_parameter('arm_time').value)
-            self.last_cmd = 0.0
+            # Arm the watchdog from startup: initialising to 0.0 disabled it
+            # (the `> 0.0` guard) until the first /drive message ever arrived.
+            self.last_cmd = time.monotonic()
             self._wd_warned = False
             self.backend.neutral()
             self.create_subscription(
@@ -258,16 +266,21 @@ def _make_node():
                 self.get_logger().error(f'actuation write failed: {e}')
 
         def _watchdog(self):
-            if self.last_cmd > 0.0 and \
-                    time.monotonic() - self.last_cmd > self.timeout:
-                try:
-                    self.backend.neutral()
-                except Exception:
-                    pass
+            if time.monotonic() - self.last_cmd <= self.timeout:
+                return
+            try:
+                self.backend.neutral()
+            except Exception as e:
+                # A watchdog that fails silently is no watchdog: the operator
+                # must know the car did NOT go neutral.
                 if not self._wd_warned:
-                    self.get_logger().warning(
-                        f'no /drive for {self.timeout:.1f}s — neutral')
+                    self.get_logger().error(f'watchdog neutral FAILED: {e}')
                     self._wd_warned = True
+                return
+            if not self._wd_warned:
+                self.get_logger().warning(
+                    f'no /drive for {self.timeout:.1f}s — neutral')
+                self._wd_warned = True
 
         def _telemetry(self):
             try:

@@ -61,6 +61,13 @@ def test_pulse_to_ticks():
     assert pca.us_to_ticks(0, 50.0) == 0
 
 
+def test_pulse_ticks_clamped_to_12bit():
+    # a pulse longer than the PWM period must saturate, not overflow the
+    # 12-bit OFF register into the always-ON bit
+    assert pca.us_to_ticks(25000, 50.0) == 4095
+    assert pca.us_to_ticks(-5, 50.0) == 0
+
+
 def test_set_pulse_writes_channel_registers():
     bus = FakeBus()
     dev = pca.PCA9685(bus, 0x40, 50.0)
@@ -130,6 +137,14 @@ def test_parse_values_layout():
     assert vp.parse_values(b'\x05') is None              # wrong command id
 
 
+def test_parse_values_truncated_returns_none():
+    # a CRC-valid but short payload (fw mismatch / partial read) must return
+    # None, not raise struct.error inside the telemetry loop
+    payload = bytes([vp.COMM_GET_VALUES]) + b'\x00' * 30
+    assert vp.parse_values(payload) is None
+    assert vp.parse_values(b'') is None
+
+
 def test_command_packets_decode():
     parser = vp.PacketParser()
     (p,) = parser.feed(vp.pkt_set_rpm(-9228))
@@ -176,6 +191,41 @@ def test_pca_backend_commands(monkeypatch):
     st = [d for r, d in writes if r == str_reg][-1]
     assert thr[2] | (thr[3] << 8) == pca.us_to_ticks(1750, 50.0)
     assert st[2] | (st[3] << 8) == pca.us_to_ticks(1900, 50.0)
+
+
+class FakeSerial:
+    def __init__(self):
+        self.tx = b''
+        self.in_waiting = 0
+
+    def write(self, data):
+        self.tx += bytes(data)
+
+
+def _servo_positions(raw):
+    import struct
+    out = []
+    for p in vp.PacketParser().feed(raw):
+        if p[0] == vp.COMM_SET_SERVO_POS:
+            out.append(struct.unpack('>H', p[1:])[0] / 1e3)
+    return out
+
+
+def test_vesc_steer_trim_stays_symmetric():
+    # trim must shift the centre, not clip one side's full lock: full-left and
+    # full-right throws stay symmetric about the trimmed centre, in [0, 1]
+    from drive_node import VescSerialBackend
+    cfg = _cfg()
+    cfg['steer_trim_us'] = 50.0
+    ser = FakeSerial()
+    backend = VescSerialBackend(ser, cfg)
+    backend.command(0.0, 0.41)                           # full left
+    backend.command(0.0, -0.41)                          # full right
+    backend.command(0.0, 0.0)                            # centre
+    left, right, centre = _servo_positions(ser.tx)
+    assert abs(centre - 0.55) < 1e-9                     # 0.5 + 50us/1000
+    assert abs((left - centre) + (right - centre)) < 1e-9   # symmetric throw
+    assert 0.0 < right < left < 1.0                      # nothing clipped
 
 
 # ─────────────────────────────────────────────────────────────────────────────

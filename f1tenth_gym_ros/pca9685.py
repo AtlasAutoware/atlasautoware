@@ -54,8 +54,12 @@ class PCA9685:
 
 
 def us_to_ticks(us, freq_hz):
-    """Pulse width in microseconds -> PCA9685 12-bit off-tick count."""
-    return int(round(float(us) * float(freq_hz) * 4096.0 / 1e6))
+    """Pulse width in microseconds -> PCA9685 12-bit off-tick count.
+
+    Clamped to the 12-bit register range: an over-long pulse (us beyond the
+    PWM period) would otherwise overflow into the always-ON bit.
+    """
+    return max(0, min(4095, int(round(float(us) * float(freq_hz) * 4096.0 / 1e6))))
 
 
 def speed_to_us(speed, max_speed, neutral_us=1500.0,

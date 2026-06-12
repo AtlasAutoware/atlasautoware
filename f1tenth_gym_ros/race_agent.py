@@ -551,8 +551,11 @@ class RaceAgent(Node):
         msg.drive.speed = float(out_speed)
         self.drive_pub.publish(msg)
 
-        # Lap counter: index wraps past the start/finish.
-        if self._prev_near > self.n - 12 and self.nearest < 12:
+        # Lap counter: index wraps past the start/finish.  Zone scales with the
+        # raceline density (a fixed ±12 spans 24% of a sparse 100-pt line but
+        # can be jumped in one 50 Hz tick on a dense one).
+        zone = max(12, self.n // 25)
+        if self._prev_near > self.n - zone and self.nearest < zone:
             self.lap_count += 1
         self._prev_near = self.nearest
 

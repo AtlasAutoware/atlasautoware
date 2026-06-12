@@ -45,12 +45,15 @@ def deskew_points(ranges, angle_min, angle_increment, scan_time,
     else:
         s = np.asarray(ages, float)
     theta = omega * s
-    x = r * np.cos(phi)
-    y = r * np.sin(phi)
+    # zero out invalid beams BEFORE the rotation so inf/nan never enters the
+    # arithmetic (silences numpy RuntimeWarnings); they're stamped nan after.
+    bad = ~np.isfinite(r) | (r <= 0.0)
+    rr = np.where(bad, 0.0, r)
+    x = rr * np.cos(phi)
+    y = rr * np.sin(phi)
     ct, st = np.cos(theta), np.sin(theta)
     xc = ct * x - st * y + vx * s
     yc = st * x + ct * y + vy * s
-    bad = ~np.isfinite(r) | (r <= 0.0)
     xc[bad] = np.nan
     yc[bad] = np.nan
     return xc, yc

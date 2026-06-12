@@ -227,10 +227,18 @@ class GymBridge(Node):
             self.ego_steer = 0.0
 
     def drive_timer_callback(self):
-        if self.ego_drive_published and not self.has_opp:
-            self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed]]))
-        elif self.ego_drive_published and self.has_opp and self.opp_drive_published:
-            self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed], [self.opp_steer, self.opp_requested_speed]]))
+        # Step physics as soon as the ego has published.  In two-car mode the
+        # opponent uses its last-known command (neutral until its driver speaks):
+        # gating the step on BOTH drivers froze the whole simulation whenever the
+        # opponent stalled, while timer_callback kept republishing stale
+        # scans/odometry — a "ghost car" the ego then planned against.
+        if self.ego_drive_published:
+            if self.has_opp:
+                action = np.array([[self.ego_steer, self.ego_requested_speed],
+                                   [self.opp_steer, self.opp_requested_speed]])
+            else:
+                action = np.array([[self.ego_steer, self.ego_requested_speed]])
+            self.obs, _, self.done, _ = self.env.step(action)
         self._update_sim_state()
 
     def timer_callback(self):

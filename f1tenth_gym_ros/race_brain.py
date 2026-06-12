@@ -309,24 +309,28 @@ class RaceStrategist:
         # ── Alongside a car: either COMPLETE the pass (we're faster) or EVADE. ──
         if alongside:
             o = min(alongside, key=lambda o: abs(o.gap))
-            # Sit on the side away from the opponent; honour a committed pass side.
-            if self.commit_side != 0:
-                side = self.commit_side
-            else:
-                side = -np.sign(o.lateral) if abs(o.lateral) > 0.05 else 1
-            offset = np.clip(side * self.side_clearance, -room_left, room_right)
+            # The side away from the opponent right now (offset is +left).
+            away = int(-np.sign(o.lateral)) if abs(o.lateral) > 0.05 else 1
             theirs = 'left' if o.lateral > 0 else 'right'
-            ours = 'LEFT' if side > 0 else 'RIGHT'
 
             if o.closing > 0.3:
                 # We're the quicker car drawing alongside a slower one — don't sit
-                # there yielding (that deadlocks); hold our side and drive past.
+                # there yielding (that deadlocks); hold our side and drive past,
+                # honouring a committed pass side.
+                side = self.commit_side if self.commit_side != 0 else away
                 self.commit_side = side
+                offset = np.clip(side * self.side_clearance,
+                                 -room_right, room_left)
+                ours = 'LEFT' if side > 0 else 'RIGHT'
                 return Decision('ATTACK', offset, 1.05,
                                 f'ATTACK: alongside on the {ours} and quicker '
                                 f'({min(o.closing, 9.0):.1f} m/s) — completing the '
                                 f'pass, holding my line', target=(o.x, o.y))
             # They are as quick or quicker (passing us) — give room, avoid contact.
+            # A previously committed pass side is stale here: honouring it can
+            # steer INTO the car that is now passing us, so always move away.
+            self.commit_side = 0
+            offset = np.clip(away * self.side_clearance, -room_right, room_left)
             return Decision('EVADE', offset, 0.92,
                             f'EVADE: car alongside ({theirs}, {o.gap:+.1f} m) — '
                             f'giving room to avoid contact', target=(o.x, o.y))
@@ -344,14 +348,16 @@ class RaceStrategist:
             if self.commit_side != 0:                 # hysteresis once committed
                 side = self.commit_side
                 room = room_left if side > 0 else room_right
+            # offset is +left, so a left move is bounded by the LEFT wall's room
+            # and a right move by the right wall's: clip to [-room_right, room_left].
             offset = np.clip(side * (abs(o.lateral) + self.side_clearance),
-                             -room_left, room_right)
+                             -room_right, room_left)
             sidestr = 'LEFT' if side > 0 else 'RIGHT'
 
             if o.gap > self.attack_range * 0.7 and o.closing < 0.3:
                 # Not closing yet — tuck into the slipstream for a run.
                 self.commit_side = 0
-                return Decision('ATTACK', np.clip(side*0.15, -room_left, room_right),
+                return Decision('ATTACK', np.clip(side*0.15, -room_right, room_left),
                                 1.05,
                                 f'ATTACK: tracking car {o.gap:.1f} m ahead — in the '
                                 f'tow, building a run before committing',
@@ -371,7 +377,7 @@ class RaceStrategist:
             if o.closing > 0.2 or abs(o.gap) < self.defend_range * 0.6:
                 # Move to cover the side they'd attack (their lateral side).
                 side = np.sign(o.lateral) if abs(o.lateral) > 0.05 else 1
-                offset = np.clip(side * 0.35, -room_left, room_right)
+                offset = np.clip(side * 0.35, -room_right, room_left)
                 sidestr = 'inside/left' if side > 0 else 'inside/right'
                 return Decision('DEFEND', offset, 1.0,
                                 f'DEFEND: car {abs(o.gap):.1f} m behind & closing — '
