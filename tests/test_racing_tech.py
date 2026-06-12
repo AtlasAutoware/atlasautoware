@@ -12,7 +12,6 @@ Validates the two research-stack upgrades without ROS or hardware:
     python3 -m pytest tests/test_racing_tech.py -q
 """
 
-import csv
 import math
 import os
 import sys
@@ -21,19 +20,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), 'f1tenth_gym_ros'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from velocity_profiler import velocity_profile, segment_lengths  # noqa: E402
 from map_controller import MAPController, build_lat_accel_lut    # noqa: E402
+from closed_loop import load_raceline, run_lap                   # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def load_raceline(path):                  # local: pursuit_agent needs rclpy
-    cols = {k: [] for k in ('x', 'y', 'heading', 'curvature', 'speed')}
-    with open(path) as f:
-        for row in csv.DictReader(f):
-            for k in cols:
-                cols[k].append(float(row[k]))
-    return tuple(np.array(cols[k]) for k in cols)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,36 +133,12 @@ def test_map_closed_loop_lap():
     # the MAP fallback must lap cleanly with bounded cross-track error
     rx, ry, rh, rc, rv = load_raceline(
         os.path.join(REPO, 'racelines', 'comp_raceline.csv'))
-    n = len(rx)
     ctl = _ctl()
     ctl.set_raceline(rx, ry, rv)
-    L = 0.33
-    px, py, yaw, v = float(rx[0]) + 0.3, float(ry[0]) - 0.2, float(rh[0]), 2.0
-    dt = 0.02
-    j = prev_j = 0
-    cum, xte = 0, []
-    for step in range(8000):
-        d2 = (rx - px) ** 2 + (ry - py) ** 2
-        j = int(np.argmin(d2))
-        d = j - prev_j
-        if d < -n / 2:
-            d += n
-        if 0 < d < n / 2:
-            cum += d
-        prev_j = j
-        steer, v_t = ctl.control(px, py, yaw, v, j)
-        a = float(np.clip((v_t - v) / dt, -8.0, 4.0))
-        px += v * math.cos(yaw) * dt
-        py += v * math.sin(yaw) * dt
-        yaw += v * math.tan(steer) / L * dt
-        v = max(0.0, v + a * dt)
-        xte.append(math.sqrt(d2[j]))
-        if cum >= n + 5:
-            break
-    assert cum >= n, f'did not complete a lap ({cum}/{n})'
-    steady = np.array(xte[100:])
-    assert steady.mean() < 0.25, f'loose tracking ({steady.mean():.2f} m)'
-    assert steady.max() < 0.8, f'ran wide ({steady.max():.2f} m)'
+    res = run_lap(ctl.control, rx, ry, rh)
+    assert res['completed'], 'did not complete a lap'
+    assert res['xte_mean'] < 0.15, f"loose tracking ({res['xte_mean']:.2f} m)"
+    assert res['xte_max'] < 0.6, f"ran wide ({res['xte_max']:.2f} m)"
 
 
 if __name__ == '__main__':
