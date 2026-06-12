@@ -118,6 +118,30 @@ def test_slip_flag_fires_during_pulses():
     assert flags[~slip].mean() < 0.1
 
 
+def test_cmd_speed_fallback_bounds_imu_drift():
+    # PCA9685-only mode (no VESC -> no wheel odometry): an uncalibrated IMU
+    # bias makes pure inertial vx drift without bound; the weakly-trusted
+    # commanded-speed update must keep the estimate bounded
+    dt, t_end, v_true = 1.0 / 200, 10.0, 3.0
+    rng = np.random.default_rng(1)
+
+    def run(with_cmd):
+        ekf = VelocityEKF()
+        ekf.x[0] = v_true                            # starts converged
+        for i in range(int(t_end / dt)):
+            ekf.predict(0.3 + rng.normal(0, 0.2), rng.normal(0, 0.2), dt)
+            ekf.update_gyro(rng.normal(0, 0.01))
+            ekf.update_nonholonomic()
+            if with_cmd and i % 4 == 0:              # 50 Hz /drive commands
+                ekf.update_cmd_speed(v_true)
+        return abs(ekf.x[0] - v_true)
+
+    drift_free = run(with_cmd=False)
+    drift_cmd = run(with_cmd=True)
+    assert drift_free > 1.5                          # bias really does run away
+    assert drift_cmd < 0.5, f'cmd fallback too loose ({drift_cmd:.2f} m/s)'
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # De-skew: synthesize a skewed scan of a circular wall from a moving sensor
 # ─────────────────────────────────────────────────────────────────────────────

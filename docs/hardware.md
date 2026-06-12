@@ -56,6 +56,35 @@ Set `backend:` to `pca9685` or `vesc` to pin one explicitly. Either way you
 get: a 2 s neutral **arming hold** at startup, a **watchdog** that snaps to
 neutral if `/drive` goes quiet for `cmd_timeout`, and neutral on shutdown.
 
+### Running without a VESC (PCA9685 + dumb hobby ESC)
+
+The PCA9685 backend emits standard RC servo pulses — identical to a
+receiver — so an ordinary hobby ESC works as a drop-in until the VESC
+arrives. Wire: PCA9685 channel 0 signal → ESC signal input (1000/1500/2000
+µs full-brake-or-reverse / neutral / full), channel 1 → steering servo.
+Nothing else changes; `backend: auto` finds the PCA9685, or pin
+`backend: 'pca9685'`. Dumb-ESC specifics:
+
+- **Run the ESC's own throttle calibration** first (per its manual) so its
+  endpoints match 1000/1500/2000 µs, then trim `full_fwd_us` /
+  `full_rev_us` / `neutral_us` if needed.
+- **Reverse lockout / brake semantics**: most RC car ESCs treat the first
+  below-neutral pulse as *brake*, and only reverse after returning to
+  neutral. The racing stack never commands reverse, so this is usually
+  what you want. If your ESC reverses immediately and you want it
+  disabled, set `full_rev_us: 1500.0` (negative speeds then clamp to
+  neutral).
+- **Stops are coasts**: speed 0 maps to the neutral pulse — a dumb ESC
+  freewheels there rather than actively braking like a VESC in
+  current-brake mode. Budget for it with a larger `aeb_dist` /
+  smaller `aeb_decel` until the VESC arrives.
+- **Arming** is covered by the existing `arm_time` neutral hold.
+- **Lost without the VESC**: `/vesc/odom` wheel-speed telemetry. The
+  velocity EKF automatically falls back to the *commanded* speed as a
+  weakly-trusted measurement (it bounds IMU drift; it is not real
+  odometry — expect a coarser estimate). `erpm_gain`, `serial_port`, and
+  `telemetry_hz` are simply unused.
+
 **First-drive calibration order** (in `config/hardware.yaml`):
 `steer_invert`/`steer_trim_us` until it drives straight → `max_steer` against
 real wheel angle → `max_speed`/`erpm_gain` against measured speed → raise

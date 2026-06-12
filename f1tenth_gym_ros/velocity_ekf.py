@@ -107,6 +107,16 @@ class VelocityEKF:
             self._v_imu = float(self.x[0])        # re-anchor on accepted data
             self._reject_t = 0.0
 
+    def update_cmd_speed(self, v_cmd, r_cmd=0.25):
+        """No-wheel-odometry fallback (e.g. PCA9685-only actuation, no VESC):
+        the *commanded* speed as a weak measurement of vx.  The large default
+        R (sigma 0.5 m/s) reflects that the car only roughly tracks its
+        command; it merely bounds the IMU integration drift, it does not
+        replace real odometry.  No slip gating — commands don't slip."""
+        self._update(float(v_cmd), self.x[0], [1.0, 0.0, 0.0], float(r_cmd))
+        if self._v_imu is not None:
+            self._v_imu = float(self.x[0])        # keep the anchor in step
+
     def update_nonholonomic(self):
         """Rear axle can't slide sideways: vy - omega*l_r ~ 0 (makes vy observable)."""
         h = self.x[1] - self.x[2] * self.l_r
@@ -123,11 +133,13 @@ class VelocityEKF:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_node():
+    import time
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile
     from sensor_msgs.msg import Imu
     from nav_msgs.msg import Odometry
+    from ackermann_msgs.msg import AckermannDriveStamped
 
     class VelocityEKFNode(Node):
         def __init__(self):
@@ -137,20 +149,34 @@ def _make_node():
             self.declare_parameter('out_topic', '/ekf/odom')
             self.declare_parameter('base_frame', 'base_link')
             self.declare_parameter('l_r', 0.17145)
+            # no-VESC fallback: while wheel odometry is silent for longer than
+            # `wheel_timeout`, the commanded speed (weakly trusted) bounds the
+            # IMU drift instead.  '' disables the fallback entirely.
+            self.declare_parameter('cmd_speed_topic', '/drive')
+            self.declare_parameter('wheel_timeout', 1.0)
             p = lambda n: self.get_parameter(n).value   # noqa: E731
 
             self.ekf = VelocityEKF(l_r=float(p('l_r')))
             self.pub = self.create_publisher(Odometry, p('out_topic'),
                                              QoSProfile(depth=10))
             self.base_frame = p('base_frame')
+            self.wheel_timeout = float(p('wheel_timeout'))
             self._last_t = None
+            self._last_wheel = None                 # monotonic time, None=never
             self._slip_logged = False
+            self._fallback_logged = False
             self.create_subscription(Imu, p('imu_topic'), self._imu_cb, 50)
             self.create_subscription(Odometry, p('wheel_odom_topic'),
                                      self._wheel_cb, 10)
+            if p('cmd_speed_topic'):
+                self.create_subscription(AckermannDriveStamped,
+                                         p('cmd_speed_topic'),
+                                         self._cmd_cb, 10)
             self.get_logger().info(
                 f"velocity_ekf ready — imu={p('imu_topic')} "
-                f"wheel={p('wheel_odom_topic')} -> {p('out_topic')}")
+                f"wheel={p('wheel_odom_topic')} "
+                f"cmd-fallback={p('cmd_speed_topic') or 'off'} "
+                f"-> {p('out_topic')}")
 
         def _imu_cb(self, m):
             t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
@@ -165,10 +191,24 @@ def _make_node():
             self._last_t = t
 
         def _wheel_cb(self, m):
+            self._last_wheel = time.monotonic()
+            self._fallback_logged = False
             self.ekf.update_wheel_speed(m.twist.twist.linear.x)
             if self.ekf.slip and not self._slip_logged:
                 self.get_logger().warning('wheel slip detected — gating odometry')
             self._slip_logged = self.ekf.slip
+
+        def _cmd_cb(self, m):
+            wheel_silent = self._last_wheel is None or \
+                time.monotonic() - self._last_wheel > self.wheel_timeout
+            if not wheel_silent:
+                return
+            self.ekf.update_cmd_speed(m.drive.speed)
+            if not self._fallback_logged:
+                self.get_logger().warning(
+                    'no wheel odometry — bounding vx with commanded speed '
+                    '(weak trust; expect a coarser estimate than with a VESC)')
+                self._fallback_logged = True
 
         def _publish(self, stamp):
             vx, vy, w = self.ekf.twist

@@ -14,7 +14,8 @@ drive_node:
     steer_trim_us: 0.0          # pulse offset to drive straight
     cmd_timeout: 0.5            # s without /drive -> neutral
     arm_time: 2.0               # s of neutral at startup (ESC arming)
-    # pca9685 backend (throttle pulse -> VESC PPM input)
+    # pca9685 backend (throttle pulse -> VESC PPM input, or any RC hobby ESC
+    # while the VESC hasn't arrived — see docs/hardware.md "without a VESC")
     i2c_bus: 1                  # Jetson header i2c bus — check `i2cdetect -l`
     i2c_address: 0x40
     pwm_hz: 50.0
@@ -52,6 +53,9 @@ velocity_ekf:
     wheel_odom_topic: '/vesc/odom'  # only published by the vesc-uart backend
     out_topic: '/ekf/odom'
     l_r: 0.17145                # m, CG to rear axle
+    cmd_speed_topic: '/drive'   # no-VESC fallback: commanded speed (weak
+    wheel_timeout: 1.0          # trust) bounds IMU drift while wheel odom
+                                # is silent for this long; '' disables
 
 oakd_camera:
   ros__parameters:
