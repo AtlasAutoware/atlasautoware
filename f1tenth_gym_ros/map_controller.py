@@ -10,7 +10,11 @@ kinematic triangle.  This compensates the tire slip that makes plain pure
 pursuit run wide exactly when it matters (high lateral g), at microsecond
 cost — near-MPC tracking with none of the solver risk.
 
-    L      = clip(q_la + m_la * v_target, la_min, la_max)     # lookahead
+    L_base = clip(q_la + m_la * v_target, la_min, la_max)     # lookahead
+    L      = clip(L_base / (1 + k_curv * kappa_ahead), la_min, la_max)
+             # kappa_ahead = mean |curvature| over [s_near, s_near + L_base];
+             # only when set_raceline() got a curvature array and k_curv > 0,
+             # otherwise L = L_base (the original speed-only schedule).
     eta    = asin( dot([-sin(yaw), cos(yaw)], p_la - p_car) / |p_la - p_car| )
     a_des  = 2 * v_target^2 * sin(eta) / L
     steer  = LUT^-1(a_des, v)        (kinematic atan(L_wb*a/v^2) at low speed)
@@ -76,11 +80,16 @@ def build_lat_accel_lut(wheelbase=0.33, max_steer=0.41,
 class MAPController:
     def __init__(self, wheelbase=0.33, max_steer=0.41,
                  m_la=0.3, q_la=0.15, la_min=0.3, la_max=5.0,
-                 lut=None, **lut_kwargs):
+                 k_curv=2.0, lut=None, **lut_kwargs):
         self.L_wb = float(wheelbase)
         self.max_steer = float(max_steer)
         self.m_la, self.q_la = float(m_la), float(q_la)
         self.la_min, self.la_max = float(la_min), float(la_max)
+        # curvature-aware lookahead: L = L_base / (1 + k_curv * kappa_ahead).
+        # k_curv = 0 (or no curvature passed to set_raceline) reproduces the
+        # plain speed-scheduled lookahead exactly.
+        self.k_curv = float(k_curv)
+        self.last_lookahead = None
         if lut is None:
             lut = build_lat_accel_lut(wheelbase=wheelbase,
                                       max_steer=max_steer, **lut_kwargs)
@@ -88,13 +97,42 @@ class MAPController:
         self._rl = None
 
     # ── raceline ────────────────────────────────────────────────────────────
-    def set_raceline(self, x, y, speed):
+    def set_raceline(self, x, y, speed, curvature=None):
         x = np.asarray(x, float); y = np.asarray(y, float)
         dx = np.diff(x, append=x[0]); dy = np.diff(y, append=y[0])
         seg = np.hypot(dx, dy)
+        kabs = kcum = None
+        if curvature is not None:
+            # prefix integral of |kappa| ds: mean curvature over the arc
+            # [s_i, s_j] is then an O(1) lookup per control step.
+            kabs = np.abs(np.asarray(curvature, float))
+            kcum = np.concatenate([[0.0], np.cumsum(kabs * seg)])
         self._rl = dict(x=x, y=y, v=np.asarray(speed, float),
                         s=np.concatenate([[0.0], np.cumsum(seg)[:-1]]),
-                        total=float(seg.sum()), n=len(x))
+                        total=float(seg.sum()), n=len(x),
+                        kabs=kabs, kcum=kcum)
+
+    def _curvature_ahead(self, i, L):
+        """Mean |curvature| over the raceline arc [s_i, s_i + L] (wraps)."""
+        rl = self._rl
+        s1 = rl['s'][i] + L
+        if s1 < rl['total']:
+            j = int(np.searchsorted(rl['s'], s1))
+            if j <= i:                            # window inside one segment
+                return float(rl['kabs'][i])
+            integral = rl['kcum'][j] - rl['kcum'][i]
+        else:                                     # wraps past the start line
+            j = int(np.searchsorted(rl['s'], s1 - rl['total'])) % rl['n']
+            integral = (rl['kcum'][rl['n']] - rl['kcum'][i]) + rl['kcum'][j]
+        return float(integral / L)
+
+    def _lookahead(self, v_t, i):
+        L = float(np.clip(self.q_la + self.m_la * v_t, self.la_min, self.la_max))
+        if self.k_curv > 0.0 and self._rl['kabs'] is not None:
+            kappa = self._curvature_ahead(i, L)
+            L = float(np.clip(L / (1.0 + self.k_curv * kappa),
+                              self.la_min, self.la_max))
+        return L
 
     # ── tire-aware inversion: a_lat desired -> steering ─────────────────────
     def steer_from_lat_accel(self, a_lat, v):
@@ -123,9 +161,11 @@ class MAPController:
     def control(self, x, y, yaw, v, nearest):
         """Pose + speed + nearest raceline index -> (steer, v_target)."""
         rl = self._rl
-        v_t = float(rl['v'][nearest % rl['n']])
-        L = float(np.clip(self.q_la + self.m_la * v_t, self.la_min, self.la_max))
-        s_la = (rl['s'][nearest % rl['n']] + L) % rl['total']
+        nearest = nearest % rl['n']
+        v_t = float(rl['v'][nearest])
+        L = self._lookahead(v_t, nearest)
+        self.last_lookahead = L
+        s_la = (rl['s'][nearest] + L) % rl['total']
         j = int(np.searchsorted(rl['s'], s_la)) % rl['n']
         dx, dy = rl['x'][j] - x, rl['y'][j] - y
         dist = math.hypot(dx, dy)
