@@ -59,6 +59,22 @@ governor (live, IMU) and the profiler (planned, curvature) now share one
 - **IMU traction governor** (a_lat ≈ |gyro z|·v) and speed-aware AEB —
   `docs/hardware.md`.
 
+## State estimation (`velocity_ekf.py`, `scan_deskew.py`)
+
+- **Velocity EKF with slip rejection** — fuses the OAK-D IMU (200 Hz
+  prediction) with VESC wheel speed, plus a nonholonomic pseudo-measurement
+  that makes lateral velocity observable. Slip is detected by comparing the
+  wheel against an IMU-anchored velocity integral (innovation gating alone
+  is defeated by slip *ramps*), with hysteresis and a rejection timeout.
+  Synthetic benchmark (25% slip pulses): speed RMSE during slip 1.05 → 0.05
+  m/s (20×), 100% detection, 0.2% false positives. Publishes `/ekf/odom`
+  for the controller, the latency predictor, and a future particle filter.
+- **Lidar de-skew** — a 10 Hz scan sweeps for ~100 ms; at 7 m/s that is
+  0.7 m of travel *within one scan*. `scan_deskew` rotates/translates every
+  beam by the EKF twist times the beam's age (exact on synthetic truth:
+  wall-distance RMS 0.31 m → 0.00). Wired into `rplidar_node` via
+  `deskew_odom_topic`.
+
 ## Adopted-next candidates (researched, not yet implemented)
 
 1. **Frenet-frame "spliner" overtaker** (ForzaETH race stack, JFR 2024,

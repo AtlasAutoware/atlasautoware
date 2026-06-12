@@ -60,6 +60,8 @@ def _make_node():
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import LaserScan
+    from nav_msgs.msg import Odometry
+    from scan_deskew import deskew_ranges
 
     class RPLidarNode(Node):
         def __init__(self):
@@ -72,6 +74,7 @@ def _make_node():
             self.declare_parameter('range_min', 0.10)
             self.declare_parameter('range_max', 25.0)
             self.declare_parameter('angle_offset', 0.0)   # rad, mounting yaw
+            self.declare_parameter('deskew_odom_topic', '')  # e.g. /ekf/odom
             p = lambda n: self.get_parameter(n).value     # noqa: E731
             self.port = p('port')
             self.baud = int(p('baudrate'))
@@ -83,6 +86,20 @@ def _make_node():
 
             qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
             self.pub = self.create_publisher(LaserScan, p('scan_topic'), qos)
+            self._twist = None
+            if p('deskew_odom_topic'):
+                self.create_subscription(Odometry, p('deskew_odom_topic'),
+                                         self._odom_cb, 10)
+                # beam age per ROS-grid bin: the unit sweeps its OWN angle
+                # 0->2pi clockwise over scan_time; ROS bin theta corresponds
+                # to rplidar angle -theta, hence this time fraction
+                theta = -math.pi + np.arange(self.num_bins) \
+                    * (2.0 * math.pi / self.num_bins)
+                frac = ((-theta - self.angle_offset) % (2.0 * math.pi)) \
+                    / (2.0 * math.pi)
+                self._ages_frac = frac - 1.0          # x scan_time at publish
+                self.get_logger().info(
+                    f"de-skew on (twist from {p('deskew_odom_topic')})")
             self._stop = False
             self._last_pub = time.monotonic()
             self.thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -103,10 +120,21 @@ def _make_node():
             scan.time_increment = scan.scan_time / self.num_bins
             scan.range_min = self.range_min
             scan.range_max = self.range_max
-            scan.ranges = bin_scan(measurements, self.num_bins, self.range_min,
-                                   self.range_max, self.angle_offset).tolist()
+            ranges = bin_scan(measurements, self.num_bins, self.range_min,
+                              self.range_max, self.angle_offset)
+            if self._twist is not None:
+                vx, vy, w = self._twist
+                ranges = deskew_ranges(
+                    ranges, scan.angle_min, scan.angle_increment,
+                    scan.scan_time, vx, vy, w,
+                    ages=self._ages_frac * scan.scan_time)
+            scan.ranges = ranges.tolist()
             self.pub.publish(scan)
             self._last_pub = now
+
+        def _odom_cb(self, m):
+            self._twist = (m.twist.twist.linear.x, m.twist.twist.linear.y,
+                           m.twist.twist.angular.z)
 
         def _read_loop(self):
             try:

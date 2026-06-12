@@ -35,6 +35,7 @@ setup(
             'drive_node = f1tenth_gym_ros.drive_node:main',
             'rplidar_node = f1tenth_gym_ros.rplidar_node:main',
             'oakd_camera = f1tenth_gym_ros.oakd_camera:main',
+            'velocity_ekf = f1tenth_gym_ros.velocity_ekf:main',
         ],
     },
 )

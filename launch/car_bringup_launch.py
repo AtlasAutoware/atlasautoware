@@ -51,6 +51,13 @@ def generate_launch_description():
     ))
     ld.add_action(Node(
         package='f1tenth_gym_ros',
+        executable='velocity_ekf',
+        name='velocity_ekf',
+        parameters=[config],
+        condition=IfCondition(LaunchConfiguration('use_camera')),
+    ))
+    ld.add_action(Node(
+        package='f1tenth_gym_ros',
         executable='raceline_mpc',
         name='raceline_mpc',
         parameters=[config],

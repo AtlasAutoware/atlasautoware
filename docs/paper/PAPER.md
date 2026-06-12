@@ -260,7 +260,27 @@ forward-integrate the kinematic bicycle by the measured delay under the
 parameter defaults to zero (simulation) and is configured per-vehicle from a
 step-steer measurement.
 
-### 4.8 Frenet-frame overtaking ("spliner")
+### 4.8 Velocity estimation with slip rejection, and lidar de-skew
+
+A three-state EKF ($v_x, v_y, \omega$, body frame) mechanizes the 200 Hz IMU
+as its prediction model and updates from the gyroscope, the wheel speed, and
+a nonholonomic pseudo-measurement ($v_y-\omega l_r\approx 0$, which makes
+lateral velocity observable). Wheel slip defeats classical innovation
+gating: a slip *ramp* drags the filter estimate along, keeping innovations
+inside any gate (we measured this failure directly). We therefore gate the
+wheel measurement against a pure-IMU velocity integral anchored at the last
+accepted update — the anchored residual exposes the full wheel offset at
+once — with hysteresis re-entry at 60% of the trip threshold and a rejection
+timeout that prevents the gate from latching on a biased IMU.
+
+Downstream, every beam of the 10 Hz mechanically-spinning lidar is motion-
+corrected ("de-skewed") by the EKF twist times the beam's age: at 7 m/s the
+car translates 0.7 m and, in corners, rotates >10° *within one sweep*,
+which biases scan matching and shifts obstacle centroids by decimetres.
+The correction is a vectorized rotate-translate per beam, applied between
+the driver and all geometry consumers.
+
+### 4.9 Frenet-frame overtaking ("spliner")
 
 For head-to-head racing we re-implement the ForzaETH spliner [2]: a
 detected opponent is projected into the raceline's Frenet frame; a passing
@@ -288,7 +308,7 @@ Candidate techniques were each implemented and benchmarked in an isolated
 copy of the repository (independent git worktrees, evaluated in parallel)
 against this harness, with adoption gated on measurable gains; the
 benchmark scripts ship in the repository (`tools/benchmark_*.py`) and the
-harness doubles as the regression-test plant (46 hardware-free unit and
+harness doubles as the regression-test plant (52 hardware-free unit and
 closed-loop tests).
 
 **Reproducibility.** `python3 -m pytest tests/ -q` runs the full suite;
@@ -401,6 +421,26 @@ vehicle half-widths (~0.15 m each) leaves ~0.17 m of physical margin at the
 default evasion distance — thin, and the parameter should be raised for
 physical cars (§7).
 
+### 6.8 Velocity estimation and de-skew (synthetic truth)
+
+On a 30 s synthetic drive (200 Hz IMU with noise and bias, 50 Hz wheel
+speed with 25% slip pulses during hard acceleration and braking,
+kinematically consistent cornering):
+
+| Estimator | speed RMSE, clean | speed RMSE, during slip |
+|---|---|---|
+| Raw wheel odometry | 0.065 m/s | 1.052 m/s |
+| EKF, no gating | 0.060 m/s | 1.041 m/s (follows the slipping wheel) |
+| EKF, anchored slip gate | **0.042 m/s** | **0.052 m/s (20×)** |
+
+Slip detection: 100% of slipping samples flagged, 0.2% false-positive rate
+on clean segments. Notably, the *ungated* EKF is barely better than raw
+wheel during slip — quantifying that the gating, not the fusion, carries
+the value. De-skew restores a scan synthesized from a sensor moving at
+7 m/s and 2.3 rad/s (per-beam honest raycast) to its static-pose geometry
+exactly (wall-distance RMS 0.307 m → numerically zero); these are
+open-loop, synthetic-truth validations rather than closed-loop lap results.
+
 ## 7. Discussion and Limitations
 
 **What the methodology bought.** Gating adoption on one shared benchmark
@@ -427,11 +467,10 @@ clearance; integrating occupancy-grid clearance checks is mechanical but
 not yet done. (iv) The overtaker chooses sides from curvature only; the
 ForzaETH original consults measured per-side track width [2].
 
-**Future work.** On-vehicle validation; an EKF fusing VESC wheel odometry
-with the camera IMU as the localization prior and a particle filter on a
-frozen map for race-time localization [6]; occupancy-aware corridors for
-the refiner and spliner; and opponent-trajectory prediction for the
-overtaker [7].
+**Future work.** On-vehicle validation; a particle filter on a frozen map
+for race-time localization [6], consuming the velocity EKF of §4.8 as its
+motion prior; occupancy-aware corridors for the refiner and spliner; and
+opponent-trajectory prediction for the overtaker [7].
 
 ## 8. Conclusion
 
@@ -506,7 +545,7 @@ without forward-prediction compensation, against zero-delay references.
 
 ```bash
 pip3 install numpy scipy "osqp<1" pytest matplotlib
-python3 -m pytest tests/ -q             # 46 unit + closed-loop tests
+python3 -m pytest tests/ -q             # 52 unit + closed-loop tests
 python3 tests/test_mpc.py               # MPC validation + solve timing (§6.1)
 python3 tools/benchmark_refiner.py      # §6.4
 python3 tools/benchmark_lookahead.py    # §6.5

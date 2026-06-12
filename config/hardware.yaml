@@ -44,6 +44,14 @@ rplidar_node:
     range_min: 0.10
     range_max: 25.0
     angle_offset: 0.0           # rad CCW, mounting yaw correction
+    deskew_odom_topic: '/ekf/odom'  # per-beam motion correction; '' = off
+
+velocity_ekf:
+  ros__parameters:
+    imu_topic: '/oakd/imu'
+    wheel_odom_topic: '/vesc/odom'  # only published by the vesc-uart backend
+    out_topic: '/ekf/odom'
+    l_r: 0.17145                # m, CG to rear axle
 
 oakd_camera:
   ros__parameters:
