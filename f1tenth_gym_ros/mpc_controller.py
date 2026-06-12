@@ -44,6 +44,37 @@ except Exception:                              # pragma: no cover
     _HAVE_OSQP = False
 
 
+class TractionGovernor:
+    """Speed governor from measured yaw rate — the IMU's seat in the control loop.
+
+    The raceline speeds come from an *assumed* friction budget; the IMU reports
+    the lateral acceleration the car is actually pulling (a_lat = |yaw_rate|·v,
+    valid while the tires hold).  When the measured a_lat exceeds `max_lat_accel`
+    the commanded speed is scaled down proportionally, then recovered gradually —
+    so a too-optimistic raceline or a low-grip patch costs a little speed instead
+    of the lap.  Using yaw rate (gyro z) keeps it agnostic to IMU mounting sign
+    and accelerometer bias.
+    """
+
+    def __init__(self, max_lat_accel=6.0, alpha=0.3, min_scale=0.6,
+                 recover=0.02):
+        self.max_lat = float(max_lat_accel)
+        self.alpha = float(alpha)       # low-pass on the a_lat estimate
+        self.min_scale = float(min_scale)
+        self.recover = float(recover)   # scale regained per update when gripping
+        self.scale = 1.0
+        self._lat = 0.0
+
+    def update(self, yaw_rate, speed):
+        """Latest gyro yaw rate (rad/s) + speed (m/s) -> speed scale in (0, 1]."""
+        self._lat += self.alpha * (abs(yaw_rate) * max(speed, 0.0) - self._lat)
+        if self._lat > self.max_lat:
+            self.scale = max(self.min_scale, self.max_lat / self._lat)
+        else:
+            self.scale = min(1.0, self.scale + self.recover)
+        return self.scale
+
+
 class KinematicMPC:
     NZ = 4                                      # state dim  [x, y, yaw, v]
     NU = 2                                      # input dim  [steer, accel]

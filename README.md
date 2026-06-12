@@ -152,6 +152,22 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 Then, press `i` to move forward, `u` and `o` to move forward and turn, `,` to move backwards, `m` and `.` to move backwards and turn, and `k` to stop in the terminal window running the teleop node.
 
+# Running on the real car (hardware bringup)
+
+The same stack drives the physical car — Jetson + OAK-D Pro (RGB + IMU) +
+RPLidar + VESC, actuated through a PCA9685 PWM board **or** direct VESC UART
+(`drive_node` auto-detects which is wired at startup):
+
+```bash
+pip3 install depthai rplidar-roboticia smbus2 pyserial
+ros2 launch f1tenth_gym_ros car_bringup_launch.py
+```
+
+Calibration lives in `config/hardware.yaml`; the racing node picks up the
+OAK-D's IMU as a traction governor and a speed-aware emergency brake. See
+[docs/hardware.md](docs/hardware.md) for wiring, VESC setup, and the
+first-drive calibration order.
+
 # Developing and creating your own agent in ROS 2
 
 There are multiple ways to launch your own agent to control the vehicles.

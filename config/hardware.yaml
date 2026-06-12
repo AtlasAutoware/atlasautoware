@@ -1,0 +1,69 @@
+# Hardware bringup parameters — the real car (Jetson + OAK-D Pro + RPLidar +
+# VESC, actuated via PCA9685 PWM or direct VESC UART, auto-detected).
+# Launched by launch/car_bringup_launch.py.  Calibrate before first drive:
+# see docs/hardware.md.
+
+drive_node:
+  ros__parameters:
+    drive_topic: '/drive'
+    backend: 'auto'             # auto | pca9685 | vesc — auto probes both
+    # shared actuation calibration
+    max_speed: 7.0              # m/s at full throttle (start LOW, e.g. 2.0)
+    max_steer: 0.41             # rad at full servo throw
+    steer_invert: false
+    steer_trim_us: 0.0          # pulse offset to drive straight
+    cmd_timeout: 0.5            # s without /drive -> neutral
+    arm_time: 2.0               # s of neutral at startup (ESC arming)
+    # pca9685 backend (throttle pulse -> VESC PPM input)
+    i2c_bus: 1                  # Jetson header i2c bus — check `i2cdetect -l`
+    i2c_address: 0x40
+    pwm_hz: 50.0
+    throttle_channel: 0
+    steer_channel: 1            # -1 if there is no separate steering servo
+    neutral_us: 1500.0
+    full_fwd_us: 2000.0
+    full_rev_us: 1000.0
+    steer_center_us: 1500.0
+    steer_half_range_us: 400.0
+    # vesc-uart backend (direct serial; also publishes wheel-speed odom)
+    serial_port: '/dev/ttyACM0'
+    serial_baud: 115200
+    erpm_gain: 4614.0           # erpm per m/s (poles, gear ratio, wheel dia)
+    odom_topic: '/vesc/odom'
+    odom_frame: 'odom'
+    base_frame: 'base_link'
+    telemetry_hz: 20.0
+
+rplidar_node:
+  ros__parameters:
+    port: '/dev/ttyUSB0'
+    baudrate: 115200            # A1/A2: 115200, A3/S1: 256000
+    scan_topic: '/scan'
+    frame_id: 'laser'
+    num_bins: 720
+    range_min: 0.10
+    range_max: 25.0
+    angle_offset: 0.0           # rad CCW, mounting yaw correction
+
+oakd_camera:
+  ros__parameters:
+    width: 640
+    height: 360
+    fps: 30.0
+    imu_hz: 200
+    rgb_topic: '/oakd/rgb'
+    info_topic: '/oakd/camera_info'
+    imu_topic: '/oakd/imu'
+    camera_frame: 'oakd_rgb'
+    imu_frame: 'oakd_imu'
+
+raceline_mpc:
+  ros__parameters:
+    scan_topic: '/scan'
+    odom_topic: '/pf/pose/odom' # map-frame pose from your localization
+    drive_topic: '/drive'
+    imu_topic: '/oakd/imu'      # enables the traction governor
+    max_lat_accel: 6.0          # m/s^2 grip budget for the governor
+    aeb_decel: 6.0              # m/s^2 assumed braking for dynamic AEB range
+    v_scale: 0.5                # global speed cap — raise as confidence grows
+    control_hz: 50.0

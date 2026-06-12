@@ -32,6 +32,9 @@ setup(
             'track_learner = f1tenth_gym_ros.track_learner:main',
             'raceline_mpc = f1tenth_gym_ros.raceline_mpc:main',
             'camera_perception = f1tenth_gym_ros.camera_perception:main',
+            'drive_node = f1tenth_gym_ros.drive_node:main',
+            'rplidar_node = f1tenth_gym_ros.rplidar_node:main',
+            'oakd_camera = f1tenth_gym_ros.oakd_camera:main',
         ],
     },
 )
