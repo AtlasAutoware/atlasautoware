@@ -139,6 +139,7 @@ def _make_node():
     from rclpy.qos import QoSProfile
     from sensor_msgs.msg import Imu
     from nav_msgs.msg import Odometry
+    from std_msgs.msg import Bool
     from ackermann_msgs.msg import AckermannDriveStamped
 
     class VelocityEKFNode(Node):
@@ -154,11 +155,13 @@ def _make_node():
             # IMU drift instead.  '' disables the fallback entirely.
             self.declare_parameter('cmd_speed_topic', '/drive')
             self.declare_parameter('wheel_timeout', 1.0)
+            self.declare_parameter('slip_topic', '/ekf/slip')  # for supervisor
             p = lambda n: self.get_parameter(n).value   # noqa: E731
 
             self.ekf = VelocityEKF(l_r=float(p('l_r')))
             self.pub = self.create_publisher(Odometry, p('out_topic'),
                                              QoSProfile(depth=10))
+            self.slip_pub = self.create_publisher(Bool, p('slip_topic'), 10)
             self.base_frame = p('base_frame')
             self.wheel_timeout = float(p('wheel_timeout'))
             self._last_t = None
@@ -194,6 +197,7 @@ def _make_node():
             self._last_wheel = time.monotonic()
             self._fallback_logged = False
             self.ekf.update_wheel_speed(m.twist.twist.linear.x)
+            self.slip_pub.publish(Bool(data=bool(self.ekf.slip)))
             if self.ekf.slip and not self._slip_logged:
                 self.get_logger().warning('wheel slip detected — gating odometry')
             self._slip_logged = self.ekf.slip

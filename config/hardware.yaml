@@ -14,8 +14,8 @@ drive_node:
     steer_trim_us: 0.0          # pulse offset to drive straight
     cmd_timeout: 0.5            # s without /drive -> neutral
     arm_time: 2.0               # s of neutral at startup (ESC arming)
-    enable_topic: '/autonomy_enabled'  # RC kill-switch gate (rc_monitor);
-    enable_timeout: 1.0                # '' to disable for bench testing
+    enable_topic: '/supervisor/enable'  # supervisor gate (ANDs the RC kill
+    enable_timeout: 1.0                 # switch in); '' = bench testing only
     # pca9685 backend (throttle pulse -> VESC PPM input, or any RC hobby ESC
     # while the VESC hasn't arrived — see docs/hardware.md "without a VESC")
     i2c_bus: 1                  # Jetson header i2c bus — check `i2cdetect -l`
@@ -112,6 +112,18 @@ particle_filter:
     n_particles: 1500
     subsample: 20               # every Nth beam (1.3 ms/update at 18 beams)
 
+supervisor:                     # watchdog-of-watchdogs: rate/health monitors ->
+  ros__parameters:              # speed scaling (DEGRADED) or disarm (EMERGENCY)
+    scan_topic: '/scan'
+    pose_topic: '/pf/pose/odom'
+    imu_topic: '/oakd/imu'
+    drive_topic: '/drive'
+    slip_topic: '/ekf/slip'     # sustained slip -> DEGRADED, then EMERGENCY
+    rc_topic: '/autonomy_enabled'  # AND the RC kill switch into the output
+    cov_threshold: 0.5          # m^2 PF position variance -> DEGRADED
+    degraded_scale: 0.4
+    recover_after: 2.0
+
 navigator:                      # goal-driving mode: run INSTEAD of raceline_mpc
   ros__parameters:              #   ros2 launch ... car_bringup_launch.py use_racing:=false
     map_yaml: ''                #   ros2 run f1tenth_gym_ros navigator --ros-args --params-file ...
@@ -126,8 +138,9 @@ raceline_mpc:
     odom_topic: '/pf/pose/odom' # map-frame pose from your localization
     drive_topic: '/drive'
     imu_topic: '/oakd/imu'      # enables the traction governor
-    actuation_delay: 0.10       # s sensor->actuator latency (measure on YOUR car:
-                                # step-steer test, lidar timestamp vs yaw-rate onset)
+    speed_scale_topic: '/supervisor/speed_scale'  # DEGRADED -> slow down
+    actuation_delay: 0.10       # s latency — measure it: data_logger +
+                                # tools/sysid_report.py (S-turn drive)
     max_lat_accel: 6.0          # m/s^2 grip budget (governor + profiler)
     aeb_decel: 6.0              # m/s^2 assumed braking for dynamic AEB range
     refine_corridor: 0.25       # m wall margin for min-curvature refinement

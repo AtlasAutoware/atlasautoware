@@ -41,6 +41,7 @@ setup(
             'particle_filter = f1tenth_gym_ros.particle_filter:main',
             'navigator = f1tenth_gym_ros.navigator:main',
             'data_logger = f1tenth_gym_ros.data_logger:main',
+            'supervisor = f1tenth_gym_ros.supervisor:main',
         ],
     },
 )
