@@ -1,6 +1,6 @@
 # AtlasAutoware: An Integrated, CPU-Only Autonomous Racing Stack for 1/10-Scale Vehicles with Component-Wise Closed-Loop Evaluation
 
-**Authors:** [author names and affiliations to be completed]
+**Author:** Eshan Iyer [affiliation and contact to be completed]
 **Code:** https://github.com/AtlasAutoware/atlasautoware
 
 ---
