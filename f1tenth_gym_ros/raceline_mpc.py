@@ -43,6 +43,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, Imu
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Float32
 from ackermann_msgs.msg import AckermannDriveStamped
 from transforms3d.euler import quat2euler
 
@@ -73,6 +74,7 @@ class RacelineMPC(Node):
         self.declare_parameter('aeb_decel', 6.0)        # m/s^2 — extends aeb_dist with speed
         self.declare_parameter('min_speed', 0.6)        # m/s creep floor when rolling
         self.declare_parameter('imu_topic', '')         # e.g. /oakd/imu; '' = off (sim)
+        self.declare_parameter('speed_scale_topic', '')  # /supervisor/speed_scale; '' = off
         self.declare_parameter('max_lat_accel', 6.0)    # m/s^2 traction-governor limit
         self.declare_parameter('actuation_delay', 0.0)  # s sensor->actuator latency
         self.declare_parameter('refine_corridor', 0.0)  # m min-curvature refinement
@@ -171,6 +173,13 @@ class RacelineMPC(Node):
             self.create_subscription(Imu, imu_topic, self._imu_cb, 10)
             self.get_logger().info(f'traction governor on (imu={imu_topic})')
 
+        # ── supervisor speed scale (optional extra v_scale factor) ────────────
+        self.sup_scale = 1.0
+        scale_topic = self.get_parameter('speed_scale_topic').value
+        if scale_topic:
+            self.create_subscription(Float32, scale_topic, self._scale_cb, 10)
+            self.get_logger().info(f'supervisor speed-scale on ({scale_topic})')
+
         # ── state + ROS wiring ─────────────────────────────────────────────────
         self.x = self.y = self.yaw = self.speed = 0.0
         self.scan = None
@@ -213,6 +222,9 @@ class RacelineMPC(Node):
         self.yaw_rate = m.angular_velocity.z            # |.| used; sign-agnostic
         self.have_imu = True
 
+    def _scale_cb(self, m):
+        self.sup_scale = float(np.clip(m.data, 0.0, 1.0))
+
     # ── emergency brake: min range in a narrow forward cone ────────────────────
     def _forward_clear(self):
         s = self.scan
@@ -247,7 +259,7 @@ class RacelineMPC(Node):
         if steer is None:                               # MPC off or solve failed
             steer, v_cmd = self.map_ctl.control(px, py, pyaw, pv, self.nearest)
 
-        v_cmd = float(v_cmd) * self.v_scale
+        v_cmd = float(v_cmd) * self.v_scale * self.sup_scale
 
         # Traction governor — scale down when the IMU says we're past the
         # lateral-grip budget (no-op until an IMU is publishing).
