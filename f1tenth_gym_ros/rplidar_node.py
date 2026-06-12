@@ -40,17 +40,18 @@ def bin_scan(measurements, num_bins, range_min=0.10, range_max=25.0,
     negated.  `angle_offset` (rad, CCW) corrects how the unit is mounted.
     Returns float32 ranges, inf where no valid return landed in a bin.
     """
-    ranges = np.full(int(num_bins), np.inf, np.float32)
-    inc = 2.0 * math.pi / int(num_bins)
-    for quality, angle_deg, dist_mm in measurements:
-        d = float(dist_mm) / 1000.0
-        if quality == 0 or not (range_min <= d <= range_max):
-            continue
-        theta = -math.radians(float(angle_deg)) + angle_offset
-        theta = (theta + math.pi) % (2.0 * math.pi) - math.pi
-        i = int((theta + math.pi) / inc) % int(num_bins)
-        if d < ranges[i]:
-            ranges[i] = d
+    num_bins = int(num_bins)
+    ranges = np.full(num_bins, np.inf, np.float32)
+    if not len(measurements):
+        return ranges
+    m = np.asarray(measurements, np.float64)            # (M, 3) q/angle/dist
+    d = m[:, 2] / 1000.0
+    keep = (m[:, 0] > 0) & (d >= range_min) & (d <= range_max)
+    theta = -np.radians(m[keep, 1]) + angle_offset
+    theta = (theta + math.pi) % (2.0 * math.pi) - math.pi
+    inc = 2.0 * math.pi / num_bins
+    idx = ((theta + math.pi) / inc).astype(np.intp) % num_bins
+    np.minimum.at(ranges, idx, d[keep].astype(np.float32))  # nearest return wins
     return ranges
 
 
