@@ -105,7 +105,10 @@ class PacketParser:
 
 def parse_values(payload):
     """COMM_GET_VALUES payload -> dict (unified FW 3.x-6.x layout)."""
-    if not payload or payload[0] != COMM_GET_VALUES:
+    # 49 = end of the largest fixed-offset field (tachometer, '>i' at 45);
+    # a truncated payload (firmware mismatch, partial read) must return None
+    # rather than raise struct.error inside the telemetry loop.
+    if not payload or payload[0] != COMM_GET_VALUES or len(payload) < 49:
         return None
     u = struct.unpack_from
     return {

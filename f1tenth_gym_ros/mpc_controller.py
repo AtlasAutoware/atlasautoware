@@ -52,15 +52,36 @@ def predict_state(x, y, yaw, v, steer, v_cmd, delay, wheelbase,
     ramp — typically 50-150 ms on a real car) the car is no longer where the
     controller planned from, so every solve chases a stale state.  The fix
     every race stack uses: integrate the kinematic bicycle forward by the
-    measured delay under the *last commanded* steer + speed target, and solve
-    from the predicted state instead.  Costs microseconds; pure (no ROS).
+    measured delay under the commands still *in flight*, and solve from the
+    predicted state instead.  Costs microseconds; pure (no ROS).
+
+    `steer` / `v_cmd` are either scalars (one command held over the whole
+    window) or equal-length sequences of the in-flight commands, **oldest
+    first**, each occupying an equal slice of the delay window.  The sequence
+    form is the correct one for a pipeline latency: during the next `delay`
+    seconds the actuator executes the commands issued over the *previous*
+    `delay` seconds — the newest command hasn't reached the wheels yet.
+    Holding only the newest command over-rotates the prediction whenever the
+    steer is changing (every corner entry/exit) and destabilizes the loop at
+    delays ≳ 2 control periods; see tools/benchmark_delay.py.
     """
     steps = int(round(float(delay) / dt))
-    for _ in range(steps):
-        a = min(max((v_cmd - v) / dt, -a_brake), a_accel)
+    if steps <= 0:
+        return x, y, yaw, v
+    try:
+        steer_seq = tuple(float(s) for s in steer)
+        v_seq = tuple(float(c) for c in v_cmd)
+    except TypeError:                           # scalars: constant command
+        steer_seq, v_seq = (float(steer),), (float(v_cmd),)
+    if not steer_seq or len(steer_seq) != len(v_seq):
+        raise ValueError('steer / v_cmd histories must be equal length')
+    m = len(steer_seq)
+    for i in range(steps):
+        k = min(i * m // steps, m - 1)          # oldest command first
+        a = min(max((v_seq[k] - v) / dt, -a_brake), a_accel)
         x += v * math.cos(yaw) * dt
         y += v * math.sin(yaw) * dt
-        yaw += v * math.tan(steer) / wheelbase * dt
+        yaw += v * math.tan(steer_seq[k]) / wheelbase * dt
         v = max(0.0, v + a * dt)
     return x, y, yaw, v
 

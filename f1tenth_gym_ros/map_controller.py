@@ -94,6 +94,21 @@ class MAPController:
             lut = build_lat_accel_lut(wheelbase=wheelbase,
                                       max_steer=max_steer, **lut_kwargs)
         self.lut_steer, self.lut_speed, self.lut_alat = lut
+        # Precompute, per speed column, the strictly-increasing (stable)
+        # branch of a_lat(steer) so the per-call inversion is a plain
+        # np.interp.  None marks columns with no usable steady state.
+        self._col_xs, self._col_ys = [], []
+        for j in range(len(self.lut_speed)):
+            col = self.lut_alat[:, j]
+            idx = np.flatnonzero(np.isfinite(col))
+            if len(idx) < 2:
+                self._col_xs.append(None)
+                self._col_ys.append(None)
+                continue
+            rising = np.maximum.accumulate(col[idx])
+            last = int(np.argmax(rising)) + 1
+            self._col_xs.append(col[idx[:last]])
+            self._col_ys.append(self.lut_steer[idx[:last]])
         self._rl = None
 
     # ── raceline ────────────────────────────────────────────────────────────
@@ -135,26 +150,40 @@ class MAPController:
         return L
 
     # ── tire-aware inversion: a_lat desired -> steering ─────────────────────
+    def _invert_col(self, a, j, v):
+        """Invert one LUT speed column: |a_lat| -> steer on the stable branch.
+
+        Falls back to the kinematic relation (with the actual speed v) when
+        the column has no usable steady-state samples; clamps to the column's
+        grip limit beyond the last attainable lateral acceleration.
+        """
+        xs, ys = self._col_xs[j], self._col_ys[j]
+        if xs is None:                            # degenerate column
+            return math.atan(self.L_wb * a / v ** 2)
+        if a >= xs[-1]:
+            return float(ys[-1])                  # grip limit — max useful steer
+        return float(np.interp(a, xs, ys))
+
     def steer_from_lat_accel(self, a_lat, v):
         a = abs(float(a_lat))
         if v < 1.0:                               # LUT and kinematics coincide
             steer = math.atan(self.L_wb * a / max(v, 0.5) ** 2)
             return math.copysign(min(steer, self.max_steer), a_lat)
-        j = int(np.argmin(np.abs(self.lut_speed - v)))
-        col = self.lut_alat[:, j]
-        ok = np.isfinite(col)
-        # keep the strictly-increasing (stable) branch of a_lat(steer)
-        idx = np.flatnonzero(ok)
-        if len(idx) < 2:
-            steer = math.atan(self.L_wb * a / v ** 2)
-            return math.copysign(min(steer, self.max_steer), a_lat)
-        rising = np.maximum.accumulate(col[idx])
-        last = int(np.argmax(rising)) + 1
-        xs, ys = col[idx[:last]], self.lut_steer[idx[:last]]
-        if a >= xs[-1]:
-            steer = ys[-1]                        # grip limit — max useful steer
+        sp = self.lut_speed
+        # linear interpolation across the speed axis: invert the two
+        # bracketing columns and blend, so steer is continuous in v (the old
+        # nearest-column lookup jumped at every column midpoint); clamp to
+        # the edge columns outside the table range.
+        if v <= sp[0]:
+            steer = self._invert_col(a, 0, v)
+        elif v >= sp[-1]:
+            steer = self._invert_col(a, len(sp) - 1, v)
         else:
-            steer = float(np.interp(a, xs, ys))
+            j1 = int(np.searchsorted(sp, v))
+            j0 = j1 - 1
+            w = (v - sp[j0]) / (sp[j1] - sp[j0])
+            steer = ((1.0 - w) * self._invert_col(a, j0, v)
+                     + w * self._invert_col(a, j1, v))
         return math.copysign(min(steer, self.max_steer), a_lat)
 
     # ── one control step ────────────────────────────────────────────────────

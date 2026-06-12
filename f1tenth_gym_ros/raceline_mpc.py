@@ -91,6 +91,13 @@ class RacelineMPC(Node):
         self.min_speed  = float(self.get_parameter('min_speed').value)
         self.delay      = float(self.get_parameter('actuation_delay').value)
         self._last_cmd  = (0.0, 0.0)                    # published (steer, speed)
+        # commands still in flight toward the actuator, oldest first — one per
+        # control tick over the delay window.  predict_state must integrate
+        # through THESE (the actuator executes the previously issued commands
+        # during the latency window, not the newest one).
+        hz = float(self.get_parameter('control_hz').value)
+        self._delay_ticks = int(round(self.delay * hz))
+        self._cmd_buf = [(0.0, 0.0)] * self._delay_ticks
 
         # ── raceline ───────────────────────────────────────────────────────────
         rl = self.get_parameter('raceline').value or self._find_raceline()
@@ -211,11 +218,16 @@ class RacelineMPC(Node):
         if self.scan is None or not self.have_odom:
             return
         # delay compensation: solve from where the car will be when the
-        # command actually reaches the wheels, not where it was last measured
+        # command actually reaches the wheels, not where it was last measured.
+        # Integrate through the in-flight command pipeline (oldest first) —
+        # holding only the last command over-rotates the prediction whenever
+        # the steer is changing and destabilizes the loop at larger delays.
         px, py, pyaw, pv = self.x, self.y, self.yaw, self.speed
         if self.delay > 0.0:
             px, py, pyaw, pv = predict_state(
-                px, py, pyaw, pv, self._last_cmd[0], self._last_cmd[1],
+                px, py, pyaw, pv,
+                [c[0] for c in self._cmd_buf] or self._last_cmd[0],
+                [c[1] for c in self._cmd_buf] or self._last_cmd[1],
                 self.delay, self.L)
         self.nearest = find_nearest(px, py, self.rl_x, self.rl_y, self.nearest)
 
@@ -251,6 +263,9 @@ class RacelineMPC(Node):
         msg.drive.speed = float(v_cmd)
         self.drive_pub.publish(msg)
         self._last_cmd = (msg.drive.steering_angle, msg.drive.speed)
+        if self._delay_ticks:                           # advance the pipeline
+            self._cmd_buf.append(self._last_cmd)
+            self._cmd_buf.pop(0)
 
         # lap counter (index wraps past start/finish)
         if self._prev_near > self.n - 12 and self.nearest < 12:

@@ -1,0 +1,670 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage[colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black,
+            citecolor=blue!50!black]{hyperref}
+
+\newcommand{\m}[1]{$#1\,\mathrm{m}$}
+\newcommand{\ms}[1]{$#1\,\mathrm{ms}$}
+
+\title{Faster and Feasible: Agent-Driven Auditing and Research-Grounded
+       Lap-Time Optimization of an F1TENTH Autonomous Racing Stack}
+\author{AtlasAutoware contributors\thanks{Audit and implementation performed
+        with Claude Code using parallel subsystem-audit and implementation
+        subagents; every finding was re-verified against the code and, where
+        possible, a deterministic closed-loop benchmark before adoption.}}
+\date{June 12, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We report a systematic, agent-driven audit and lap-time improvement pass
+over AtlasAutoware, an open-source ROS~2 racing stack for 1/10-scale
+(F1TENTH/RoboRacer) autonomous racing.  Four parallel audit agents
+reviewed the stack's subsystems, producing ranked findings that were
+independently re-verified and either fixed or rejected; two further
+implementation agents then applied current racing research under a hard
+evidence bar (a shared deterministic closed-loop benchmark plus
+regression tests).  Three results stand out.  (1)~\emph{Feasibility
+before speed}: the shipped competition raceline penetrates mapped walls
+in five corner regions (minimum clearance $0.000\,\mathrm{m}$), and the
+stack's wall-blind corridor refinement deepens the violations --- its
+advertised lap-time gains were partly fictional.  A safety-gated
+minimum-curvature refinement with a spatially-varying corridor
+\cite{heilmeier,tumftm} produces a line with a guaranteed
+$0.206\,\mathrm{m}$ clearance floor that is nonetheless
+$0.98\,\mathrm{s}$ \emph{faster} closed-loop ($41.48 \rightarrow
+40.50\,\mathrm{s}$).  (2)~\emph{Latency is a lap-time problem}: under
+$140\,\mathrm{ms}$ of injected actuator delay the model-predictive
+controller's lap degrades from $41.5$ to $69.5\,\mathrm{s}$, and the
+stack's shipped delay compensation made it \emph{worse} at realistic
+latencies because it forward-simulated the newest command while the
+actuator was still executing older in-flight commands; a pipeline-aware
+predictor holds lap time and tracking at zero-delay levels across the
+full $0$--$140\,\mathrm{ms}$ sweep.
+(3)~\emph{Contouring control, honestly evaluated}: a
+curvature-integrated LTV-MPCC \cite{liniger,cimpcc} with a fully
+self-enforced friction budget does \emph{not} reproduce the literature's
+11--12\% lap-time gains --- the offline line already exhausts the
+corridor at equal budget --- but it ties the best budget-valid tracking
+configuration's lap time ($47.24$ vs.\ $47.28\,\mathrm{s}$) while
+guaranteeing $0.281\,\mathrm{m}$ driven wall clearance (tracker:
+$0.000\,\mathrm{m}$), and the comparison exposes that the tracker's
+faster nominal laps transiently over-drive the friction budget
+$3.4\times$ in the grip-free benchmark.
+Alongside, the audit fixed eight verified defects (three
+safety-relevant) and removed $0.12\,\mathrm{rad}$ steering
+discontinuities from the pursuit fallback.  Every adopted change is
+gated on the shared benchmark; rejected hypotheses are reported with
+data.  The test suite grew from 52 to 73 passing tests.
+\end{abstract}
+
+\section{Introduction}
+
+AtlasAutoware is an integrated F1TENTH racing stack: a simulation bridge
+over the \texttt{f1tenth\_gym} simulator \cite{okelly}, SLAM mapping,
+minimum-curvature raceline optimization with friction-limited velocity
+profiling \cite{heilmeier}, a linear-time-varying MPC raceline tracker
+with an OSQP backend, a tire-aware Model- and Acceleration-based Pursuit
+(MAP) fallback controller \cite{becker}, a lidar/camera opponent tracker
+feeding a race-strategy state machine, and a hardware abstraction layer
+(VESC UART or PCA9685 PWM actuation, RPLidar, OAK-D camera).  The same
+nodes drive both the simulator and the physical car.
+
+This paper documents one complete
+\emph{audit--verify--improve--measure} cycle over that stack with an
+explicit objective set by the maintainer: \textbf{reduce lap time, using
+current research}.  The contributions are:
+\begin{enumerate}
+  \item a methodology for parallel agent audits and research transfer
+        with an explicit evidence bar (Section~\ref{sec:method});
+  \item a feasibility analysis of the stack's racing line showing the
+        shipped line and its refinement benchmark cut walls, plus a
+        safety-gated refinement that is both feasible and faster
+        (Section~\ref{sec:raceline});
+  \item a root-cause analysis and fix of actuator-delay compensation,
+        recovering up to $28\,\mathrm{s}$ per lap at high latency
+        (Section~\ref{sec:delay});
+  \item an implementation and honest evaluation of contouring control
+        (MPCC \cite{liniger,cimpcc}) against the stack's tracking MPC
+        under equal physics budgets (Section~\ref{sec:mpcc});
+  \item eight verified and fixed defects, three safety-relevant
+        (Section~\ref{sec:bugs}); and
+  \item negative results --- audit claims and improvement hypotheses
+        that did \emph{not} survive verification
+        (Section~\ref{sec:negative}).
+\end{enumerate}
+
+\section{Related work and method selection}
+\label{sec:related}
+
+The optimization-based racing pipeline --- global raceline from
+minimum-curvature QP \cite{heilmeier,tumftm}, friction-limited
+forward--backward velocity profile, and a tracking or contouring
+controller --- remains the backbone of competitive 1/10-scale racing
+\cite{forzaeth,survey}.  Within that family, Model Predictive Contouring
+Control \cite{liniger} replaces profile tracking with online progress
+maximization over the track corridor; a 2025 curvature-integrated
+variant reports 11--12\% lap-time reductions on the F1Tenth platform
+\cite{cimpcc}, and the survey of \cite{survey} ranks
+optimization-and-tracking pipelines fastest among classical methods.
+Learning-based alternatives --- learning MPC \cite{lmpc}, data-driven
+tuning and racing-line synthesis \cite{bayesrace}, and most recently
+end-to-end reinforcement-learning policies that beat both a
+state-of-the-art MPC and expert human drivers on F1Tenth hardware
+\cite{rlracing} --- define the current frontier \cite{roboracer}.
+
+Method selection for this pass was constrained by verifiability: every
+adopted change must be validated in the repository's deterministic
+closed-loop harness inside the development sandbox (no GPU training, no
+live simulator).  We therefore implemented the strongest
+\emph{verifiable} items --- safety-gated minimum-curvature refinement
+\cite{heilmeier}, pipeline-aware delay compensation, and a
+curvature-integrated kinematic MPCC \cite{liniger,cimpcc} evaluated
+under a self-enforced friction budget --- and scope RL policy training
+\cite{rlracing} as future work on the real simulator.
+
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Parallel subsystem audits}
+
+Four read-only audit agents were launched concurrently, one per
+subsystem, instructed to rank findings by impact~$\times$~confidence and
+to verify suspicions by executing the stack's pure-logic paths (the
+repository isolates its mathematics from ROS, so controllers,
+estimators, planners, and protocol codecs all run under plain
+\texttt{pytest}): \textbf{control} (LTV-MPC, its ROS wrapper with AEB
+and traction governor, MAP fallback, pure pursuit);
+\textbf{estimation and planning} (velocity EKF, lidar de-skew, velocity
+profiler, raceline optimizer/refiner, overtaking spliner);
+\textbf{strategy and simulation bridge} (opponent tracker and fusion,
+strategy state machine, two-car gym bridge); and \textbf{hardware and
+perception} (drive node, VESC UART protocol, PCA9685 driver, RPLidar
+binning, camera geometry).
+
+\subsection{Evidence bar}
+
+Audit findings are treated as \emph{hypotheses}.  Each was re-verified
+against the source by the coordinating agent before any code change;
+claims that could not be reproduced were rejected
+(Section~\ref{sec:negative}).  Behavioural changes had to satisfy two
+gates:
+\begin{enumerate}
+  \item \textbf{Regression gate}: the full unit/closed-loop test suite
+        passes, and each fixed defect gains a test that fails on the old
+        code wherever the logic is hardware-independent.
+  \item \textbf{Benchmark gate}: performance-motivated changes must
+        improve the shared deterministic closed-loop lap benchmark and
+        may not regress the zero-delay baseline.  For raceline changes
+        a third gate applies: a \emph{clearance floor} against the
+        occupancy grid's euclidean distance field.
+\end{enumerate}
+Verified single-site defects were fixed by the coordinating agent;
+larger work items went to parallel implementation subagents with
+strictly disjoint file ownership, and their claims (including
+``adopted'' vs.\ ``rejected'' calls) were re-run and re-verified by the
+coordinator before committing.
+
+\subsection{The shared closed-loop harness}
+\label{sec:harness}
+
+All quantitative claims use the repository's single benchmark
+(\texttt{tests/closed\_loop.py}): a kinematic-bicycle plant integrated
+at $50\,\mathrm{Hz}$ lapping the competition raceline, starting from a
+deliberate $0.36\,\mathrm{m}$ pose error.  The harness reports lap time
+and perpendicular cross-track error (XTE; mean and max after a settle
+period), and can hold each command in a FIFO to emulate
+sensor-to-actuator latency.  The plant matches the model the MPC plans
+with, so results isolate \emph{controller and line} behaviour from model
+error; runs are deterministic and free of ROS scheduling noise.  Because
+the plant has no grip limit, any controller allowed to choose its own
+speeds must \emph{self-enforce} the friction budget
+(Section~\ref{sec:mpcc}); XTE differences below
+${\sim}0.005\,\mathrm{m}$ are within discretization noise and are not
+claimed as improvements.
+
+\section{Lap time I: the racing line must first exist on the track}
+\label{sec:raceline}
+
+\subsection{The shipped line cuts walls}
+
+Checking the competition raceline against the track map's euclidean
+distance field (EDT of the occupancy grid, $0.1296\,\mathrm{m}$/px)
+shows its \textbf{minimum wall clearance is} \m{0.000}: in five corner
+regions the line passes \emph{inside} mapped walls, up to \m{0.518}
+deep at the worst chicane (Figure~\ref{fig:raceline}).  The 5th
+percentile of clearance is \m{0.149} --- less than half a car width
+from the wall for a tenth of the lap.  Worse, the repository's
+refinement benchmark applies a \emph{scalar} corridor with no wall
+knowledge; at every corridor setting in $\{0.10\ldots0.35\}\,\mathrm{m}$
+the refined line's minimum clearance stays \m{0.000} (5th percentile
+collapsing to \m{0.001} at $0.35$): the benchmark's advertised lap-time
+gains (up to $5\,\mathrm{s}$) come from cutting the same walls deeper.
+Closed-loop lap times on such lines are partly fictional --- a real car
+DNFs there.
+
+\subsection{Safety-gated minimum-curvature refinement}
+
+The replacement pipeline (\texttt{tools/refine\_comp\_raceline.py},
+deterministic; re-run byte-identical) is the Heilmeier
+minimum-curvature QP \cite{heilmeier,tumftm} made wall-aware:
+\begin{enumerate}
+  \item \textbf{safety repair}: waypoints below the clearance floor are
+        moved minimally toward open space along the track normal;
+  \item \textbf{refinement with a spatially-varying corridor}: the
+        existing QP refiner natively accepts per-point corridor
+        budgets; each point's budget is
+        $\mathrm{clip}\!\left(\min(c_i - 0.20, \; 0.35 - d_i),\,
+        0,\, 0.35\right)$ where $c_i$ is current clearance and $d_i$
+        displacement already spent --- so the optimizer can never buy
+        curvature with clearance below the \m{0.20} floor;
+  \item \textbf{re-profiling} with the \emph{same} friction parameters
+        as the shipped line ($a_{\mathrm{lat}} \le 6.5\,\mathrm{m/s^2}$,
+        $a_{\mathrm{accel}} \le 5.0$, $a_{\mathrm{brake}} \le 7.0$,
+        $v \in [1.5, 7.0]\,\mathrm{m/s}$; the shipped speed column is
+        reproduced to $<10^{-3}\,\mathrm{m/s}$ by these parameters, so
+        no limit was raised).
+\end{enumerate}
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{@{}lcc@{}}
+    \toprule
+    & Shipped line & Safety-gated refined line \\
+    \midrule
+    Wall clearance min / 5th pct (m) & 0.000 / 0.149 & \textbf{0.206} / 0.262 \\
+    Closed-loop MPC lap (s) & 41.48 & \textbf{40.50} \\
+    XTE mean / max (m) & 0.123 / 0.406 & 0.130 / 0.474 \\
+    Profile estimate $\sum ds/v$ (s) & 41.63 & 41.37 \\
+    $\max|\kappa|$ / $\mathrm{mean}|\kappa|$ (1/m) & 2.526 / 0.156 & 1.075 / 0.132 \\
+    Length (m) / points & 240.3 / 300 & 243.4 / 325 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Old vs.\ new competition raceline (independently re-verified).
+  The new line is both strictly feasible (clearance floor \m{0.20}
+  everywhere) and $0.98\,\mathrm{s}$ faster closed-loop, despite being
+  $3.1\,\mathrm{m}$ longer --- the curvature reduction
+  ($\max|\kappa|$ down $2.4\times$) buys more speed than the detours
+  cost.}
+  \label{tab:raceline}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\textwidth]{figures/raceline_feasibility.png}
+  \caption{The shipped racing line (red) vs.\ the safety-gated refined
+  line (blue) on the competition track.  Orange circles mark shipped
+  waypoints inside or touching walls; the worst penetration is
+  \m{0.518}.  The refined line holds a \m{0.206} clearance floor and is
+  still $0.98\,\mathrm{s}$ faster closed-loop.}
+  \label{fig:raceline}
+\end{figure}
+
+The result (Table~\ref{tab:raceline}) inverts the usual
+speed--safety trade: enforcing feasibility \emph{and} refining curvature
+yields $-0.98\,\mathrm{s}$ closed-loop ($41.48 \rightarrow
+40.50\,\mathrm{s}$) with maximum curvature reduced $2.4\times$ --- the
+gains previously attributed to corridor width were actually available
+from geometry, without the wall cutting.
+
+\section{Lap time II: latency-robust control}
+\label{sec:delay}
+
+A real car has $50$--$150\,\mathrm{ms}$ of sensor-to-actuator latency.
+The baseline sweep (Table~\ref{tab:delay}, ``naive'') shows the MPC ---
+\m{0.123} mean XTE at zero delay --- degrading $4.8\times$ by \ms{140},
+with lap time inflating from $41.5$ to $69.5\,\mathrm{s}$: at race
+latencies, delay handling \emph{is} a lap-time feature.
+
+The stack already shipped a compensator: \texttt{predict\_state}
+forward-integrates the kinematic bicycle by the known delay and the MPC
+solves from the predicted pose.  Benchmarked closed-loop, the shipped
+compensation was \emph{worse than no compensation} at \ms{80} (XTE mean
+$0.242$ vs.\ $0.195$) and unstable beyond \ms{100}, producing
+corner-cutting laps.  The root cause is the prediction's command
+semantics: it held the \emph{newest} commanded (steer, speed) constant
+over the whole delay window, but under pipeline latency the actuator is
+still executing the \emph{older in-flight} commands during that window.
+Whenever steering is changing --- every corner entry and exit --- the
+prediction over-rotates the pose, and the error grows with delay until
+the loop destabilizes.
+
+The fix keeps a buffer of the commands published during the last delay
+window and integrates the prediction through them oldest-first, each
+holding its slice of the window (scalar inputs keep bit-identical
+legacy behaviour).  Tracking then holds at zero-delay levels --- XTE
+mean $0.121$--$0.123\,\mathrm{m}$, lap time within $0.12\,\mathrm{s}$ of
+baseline --- across the entire sweep (Table~\ref{tab:delay},
+Figure~\ref{fig:delay}); at \ms{140} that is $27.9\,\mathrm{s}$ of lap
+time recovered relative to naive.  The property carries to the new
+raceline of Section~\ref{sec:raceline}: at \ms{100}, $40.56\,\mathrm{s}$
+compensated vs.\ $50.06\,\mathrm{s}$ naive.  A regression test gates
+the \ms{100} case.
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{@{}r rrr rrr rrr@{}}
+    \toprule
+    & \multicolumn{3}{c}{Naive (no compensation)}
+    & \multicolumn{3}{c}{Shipped compensation}
+    & \multicolumn{3}{c}{Pipeline-aware (fixed)} \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(l){8-10}
+    Delay (ms) & lap (s) & $\overline{\mathrm{XTE}}$ & max
+               & lap (s) & $\overline{\mathrm{XTE}}$ & max
+               & lap (s) & $\overline{\mathrm{XTE}}$ & max \\
+    \midrule
+      0 & 41.48 & 0.123 & 0.406 & 41.48 & 0.123 & 0.406 & 41.48 & 0.123 & 0.406 \\
+     40 & 40.40 & 0.111 & 0.354 & 41.52 & 0.121 & 0.403 & 41.52 & 0.122 & 0.405 \\
+     80 & 43.74 & 0.195 & 0.538 & 42.08 & 0.242 & 0.652 & 41.54 & 0.122 & 0.405 \\
+    100 & 50.48 & 0.322 & 0.804 & 42.16 & 0.261 & 0.599 & 41.56 & 0.121 & 0.404 \\
+    120 & 59.86 & 0.461 & 1.108 & 33.72$^{\dagger}$ & 0.508 & 1.472 & 41.58 & 0.121 & 0.404 \\
+    140 & 69.52 & 0.588 & 1.381 & 33.90$^{\dagger}$ & 0.539 & 1.496 & 41.60 & 0.121 & 0.404 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Closed-loop MPC under injected actuator delay, measured on
+  the pre-existing raceline
+  (\texttt{tools/benchmark\_delay.py --raceline
+  racelines/comp\_raceline\_unrefined.csv}; XTE in metres).
+  $^{\dagger}$\,The shipped compensation's short ``laps'' at
+  $120$--$140\,\mathrm{ms}$ are corner-cutting, not speed.}
+  \label{tab:delay}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/mpc_delay_sweep.png}
+  \caption{MPC under actuator delay, naive vs.\ pipeline-aware
+  compensation (compensator told the true delay; pre-existing
+  raceline).  Left: mean cross-track error; right: lap time.}
+  \label{fig:delay}
+\end{figure}
+
+\section{Lap time III: contouring control under an honest budget}
+\label{sec:mpcc}
+
+Model Predictive Contouring Control \cite{liniger} replaces
+speed-profile tracking with online progress maximization over the track
+corridor; the curvature-integrated variant CiMPCC reports 11--12\%
+lap-time reductions on F1Tenth hardware \cite{cimpcc}.  We implemented a
+kinematic LTV-MPCC on the stack's persistent-OSQP pattern
+(\texttt{f1tenth\_gym\_ros/mpcc\_controller.py}): lag/contour error
+split along the station tangent and normal, CiMPCC-style contour
+weights shaped by upcoming curvature ($4 \rightarrow 24$ toward
+apexes), a linear progress reward replacing speed tracking, real-time
+iteration relinearized about the previous solution \emph{fractionally
+shifted} by the control period, and hard corridor bounds from the map's
+distance field with soft--hard slack.  Horizon $20 \times
+0.08\,\mathrm{s}$; solve times $1.4 / 1.6 / 2.7\,\mathrm{ms}$
+(mean/p95/max), zero failures.
+
+\paragraph{The benchmark must be made cheat-proof first.}
+The harness plant has no grip limit and no walls, so a controller free
+to choose its own speeds can buy lap time with physics the car does not
+have.  The MPCC therefore \emph{self-enforces} the same budget the
+velocity profiler uses ($a_{\mathrm{lat}} \le 6.5\,\mathrm{m/s^2}$,
+friction-ellipse-coupled longitudinal limits, $v \le 7\,\mathrm{m/s}$)
+via per-stage curvature speed caps, ellipse-bounded acceleration, and an
+output governor --- and all metrics below are measured on the
+\emph{driven trajectory}, not the plan.
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{@{}l rrrrr r rr@{}}
+    \toprule
+    Controller & lap (s) & clr$_{\min}$ (m) & $a_{\mathrm{lat}}^{\max}$
+    & $a_{\mathrm{lat}}^{p99.5}$ & $\overline{\mathrm{XTE}}$ (m)
+    & fails & p95 (ms) \\
+    \midrule
+    tracking MPC (nominal) & 43.22 & 0.000 & 22.03 & 16.33 & 0.115 & 0 & 0.6 \\
+    tracking + governor & 46.52 & 0.000 & 6.50 & 6.50 & 0.996 & 0 & 0.9 \\
+    tracking + governor, $0.8\times$ profile & 47.28 & 0.000 & 6.50 & 6.50 & 0.108 & 0 & 0.7 \\
+    \textbf{MPCC (self-enforced budget)} & \textbf{47.24} & \textbf{0.281} & \textbf{6.44} & 6.07 & 0.026 & 0 & 1.6 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Contouring vs.\ tracking on the new competition line, equal
+  physics budget ($a_{\mathrm{lat}} \le 6.5\,\mathrm{m/s^2}$);
+  \texttt{tools/benchmark\_mpcc.py}; all quantities measured on the
+  driven trajectory, including the standardized initial pose-error
+  recovery.  The nominal tracker's $43.22\,\mathrm{s}$ is not a real
+  lap: it pulls up to $22\,\mathrm{m/s^2}$ lateral ($3.4\times$ budget)
+  and touches walls.  On the old wall-cutting line (not shown), MPCC is
+  the only controller that produces a physically valid lap at all
+  ($50.26\,\mathrm{s}$, clearance $0.307\,\mathrm{m}$).}
+  \label{tab:mpcc}
+\end{table}
+
+\paragraph{Result.}
+Table~\ref{tab:mpcc}: MPCC ties the best budget-valid tracking
+configuration on lap time ($47.24$ vs.\ $47.28\,\mathrm{s}$) while
+guaranteeing what no tracking row achieves --- a $0.281\,\mathrm{m}$
+driven clearance floor, budget compliance
+($a_{\mathrm{lat}}^{\max} = 6.44 < 6.5\,\mathrm{m/s^2}$), and a
+$4\times$ smaller mean cross-track deviation from the corridor centre.
+We did \emph{not} reproduce CiMPCC's 11--12\% lap-time gain, and the
+reason is structural rather than a tuning failure: those gains come
+from exploiting track width the reference does not use, and this
+stack's reference is already a minimum-curvature line over the same
+corridor (Section~\ref{sec:raceline}).  At equal friction budget there
+is simply little width left to spend.  Conversely, when the reference
+is bad --- the old wall-cutting line --- MPCC's corridor constraint
+makes it the only controller that completes a feasible lap, which is
+the property that matters when the global planner fails on race day.
+
+Four engineering details proved load-bearing and are documented in
+\texttt{docs/mpcc.md}: (i)~when the control rate differs from the
+stage rate, the warm-start must be \emph{fractionally} shifted --- a
+full-stage shift silently postpones planned braking forever;
+(ii)~every stage needs an anchor to the profiler's global speed
+profile, or slow corners enter the horizon too late to brake for;
+(iii)~plan at $0.95\times$ the lateral budget but enforce $1.0\times$
+at the output --- the gap is the closed loop's steering authority; and
+(iv)~corridor bounds must threshold the distance field along the
+normal, since free-space probes overestimate room near diagonal
+walls.
+
+\section{Supporting result: smooth fallback steering}
+\label{sec:map}
+
+The MAP fallback \cite{becker} inverts a lateral-acceleration
+$\to$ steer lookup table.  The lateral-acceleration axis was
+interpolated but the speed axis selected the \emph{nearest} LUT column,
+so commanded steering jumped by up to $0.119\,\mathrm{rad}$
+($\approx 6.8^{\circ}$) at every column midpoint
+(Figure~\ref{fig:lut}).  The fix inverts the two bracketing speed
+columns and blends linearly --- bit-identical at the LUT's sample
+speeds, clamped outside the table, and cheaper per call
+($\approx 5\,\mu\mathrm{s}$).  Closed-loop the change is
+neutral-to-slightly-better (at $1.3\times$ profile speed: XTE mean
+$0.1575 \rightarrow 0.1564$, max $1.287 \rightarrow 1.267$,
+steering-rate std $1.144 \rightarrow 1.104\,\mathrm{rad/s}$); it was
+adopted for the open-loop continuity, which matters on the physical car
+where each discontinuity excites the steering servo.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/map_lut_interpolation.png}
+  \caption{MAP controller commanded steer vs.\ speed at constant
+  lateral acceleration: nearest-column lookup (red) vs.\
+  bracketing-column interpolation (blue).}
+  \label{fig:lut}
+\end{figure}
+
+\section{Verified defects and fixes}
+\label{sec:bugs}
+
+Table~\ref{tab:bugs} summarises the eight verified defects fixed during
+the audit.  Three are safety-relevant: the strategist's lateral-offset
+clamps used \emph{swapped wall bounds} at all four decision sites (a
+$+$left offset was clamped by the \emph{right} wall's free room --- with
+a wall \m{0.1} to the left, a DEFEND decision would command \m{0.35}
+left, i.e.\ \m{0.25} into the wall); the EVADE mode \emph{honoured a
+stale committed pass side} and could steer into the car that was passing
+(fixed to always move away and clear the commitment, with a two-phase
+regression scenario); and the two-car simulation bridge \emph{froze
+physics} whenever the opponent driver had not published, while sensors
+kept republishing the stale world --- the ego then raced a ghost car
+(fixed to step on ego publish with the opponent's last-known command).
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{@{}p{2.0cm}p{4.8cm}p{4.0cm}p{3.4cm}@{}}
+    \toprule
+    Subsystem & Defect & Failure mode on track & Fix \\
+    \midrule
+    Strategy & Offset clamps with swapped wall bounds (4 sites) &
+    Wall contact exactly when clamping matters &
+    Clamp $+$left offsets by left-wall room \\
+    \addlinespace
+    Strategy & EVADE honoured stale committed pass side &
+    Evading \emph{into} the passing car &
+    Move away dynamically; clear commitment \\
+    \addlinespace
+    Sim bridge & Two-car physics required both drivers to publish &
+    Frozen world; ghost-car scans &
+    Step on ego publish \\
+    \addlinespace
+    Drive node & Watchdog disarmed until first \texttt{/drive} ever &
+    No timeout-neutral before first command &
+    Arm at startup \\
+    \addlinespace
+    Drive node & Watchdog \texttt{neutral()} failures swallowed &
+    Operator unaware car not neutral &
+    Log the failure \\
+    \addlinespace
+    Drive node & VESC steering ignored configured half-range &
+    Full lock clipped on one side when trim${}\neq0$ &
+    Mirror PCA9685 pulse map \\
+    \addlinespace
+    VESC protocol & \texttt{parse\_values} without length guard &
+    Telemetry-thread crash on truncated payload &
+    Length check, return \texttt{None} \\
+    \addlinespace
+    PCA9685 & \texttt{us\_to\_ticks} unclamped &
+    Overflow into always-ON register bit &
+    Clamp to 12-bit range \\
+    \bottomrule
+  \end{tabular}
+  \caption{Verified defects.  Each has a regression test except the
+  simulation-bridge fix (requires a live two-car simulator).  Two
+  hygiene items were fixed alongside: invalid lidar beams zeroed before
+  de-skew rotation, and the lap-counter wrap zone scaling with raceline
+  density.}
+  \label{tab:bugs}
+\end{table}
+
+\section{Negative results}
+\label{sec:negative}
+
+Findings that did not survive verification, recorded so they are not
+re-raised:
+
+\begin{itemize}
+  \item \textbf{The refinement benchmark's lap-time gains were partly
+        wall-cutting.}  The repository's prior evaluation credited
+        corridor refinement with up to $5\,\mathrm{s}$/lap; against the
+        map's distance field those refined lines have \m{0.000} minimum
+        clearance.  The honest, wall-aware gain at a \m{0.20} clearance
+        floor is $0.98\,\mathrm{s}$ (Section~\ref{sec:raceline}).
+  \item \textbf{Estimation and planning are clean.}  The audit of the
+        velocity EKF (Jacobians, Joseph-form covariance update, slip
+        gating), lidar de-skew geometry, friction-ellipse
+        forward--backward profiler (including lap-seam propagation),
+        the optimizer/refiner QP formulations, and the Frenet spliner
+        found no correctness defects; the only action was a cosmetic
+        NaN-warning fix.
+  \item \textbf{MPC formulation is sound.}  Discrete linearization,
+        angle unwrapping, OSQP warm-start usage, and the persistent-QP
+        sparsity-update path were checked and confirmed correct.
+  \item \textbf{``Nearest index not recomputed after prediction'' ---
+        false.}  The audit hypothesized the ROS node fed the MPC a
+        nearest-raceline index from the stale pose; inspection showed it
+        already recomputes it from the predicted pose.  The delay defect
+        was the command-pipeline semantics of Section~\ref{sec:delay}.
+  \item \textbf{``Reference temporal mismatch under delay'' --- rejected
+        empirically.}  After the pipeline fix, residual compensated XTE
+        ($0.121$) matches the zero-delay baseline ($0.123$), leaving
+        nothing for a reference-time shift to explain.
+  \item \textbf{Curvature-scaled speed weighting --- rejected.}
+        Scaling the MPC's speed-tracking weight by reference curvature,
+        $q_v\,(1 + k\,|\kappa_{\mathrm{ref}}|)$, swept over
+        $k \in \{0.5, 1, 2, 4\}$: XTE mean rose monotonically
+        ($0.123 \rightarrow 0.125$--$0.134$) with no
+        $\mathrm{XTE}_{\max}$ improvement at any gain.  On a kinematic
+        plant with no grip limit, harder speed tracking only trades away
+        position tracking.  Reverted; recorded in \texttt{docs/mpc.md}.
+  \item \textbf{AEB time-to-collision is ego-speed based.}  Real
+        limitation (head-on closing speed underestimated), but it is
+        the standard single-lidar formulation; a proper fix needs
+        opponent velocity fused into the AEB path --- scoped as future
+        work rather than a landed half-measure.
+\end{itemize}
+
+\section{Threats to validity}
+
+The harness plant is the kinematic bicycle the MPC plans with: results
+isolate controller and line behaviour but exclude tire slip, which on
+the real car is handled by the traction governor and slip-rejecting EKF
+(audited clean, unchanged).  Controllers that choose their own speeds
+self-enforce the friction budget (Section~\ref{sec:mpcc}); the budget
+itself ($6.5\,\mathrm{m/s^2}$) was inherited, not re-identified.  Delay
+compensation is evaluated with the compensator told the true delay; on
+hardware the delay must be identified
+(\texttt{actuation\_delay} parameter), and sensitivity to
+misidentification is not characterized here.  Wall clearance is judged
+against the SLAM map; map error consumes part of the \m{0.20} floor.
+Strategy fixes are validated by unit-level scenario tests, not full
+two-car simulation.
+
+\section{Conclusion}
+
+Asked to make a racing stack faster with current research, the most
+valuable early move turned out to be making its existing speed
+\emph{real}: the shipped racing line --- and the benchmark used to
+improve it --- cut walls, and the controller's deployed latency path was
+benchmarked only at zero delay, where its broken compensation was
+invisible.  After repairing feasibility, the research transfer paid in
+the expected order: wall-aware minimum-curvature refinement
+\cite{heilmeier} ($-0.98\,\mathrm{s}$, with a clearance guarantee the
+old line never had), pipeline-aware delay compensation (up to
+$-27.9\,\mathrm{s}$ at \ms{140} vs.\ naive; the difference between a
+competitive lap and a crawl at real latencies), and contouring control
+--- which did not beat the tracking pipeline at equal budget, but tied
+it while adding the clearance and budget guarantees the tracking rows
+lack, and exposed that the nominal tracker's faster laps over-drive the
+benchmark's missing physics.
+Of the improvement hypotheses tested, the adopted ones are exactly
+those that survived a deterministic closed-loop benchmark with hard
+safety gates; the rejected ones are reported with data.  The general
+lesson for racing stacks: \emph{a lap time is only as real as the
+feasibility and latency assumptions under it} --- benchmark the
+deployed path, including the actuator pipeline and the walls.
+
+\begin{thebibliography}{12}
+\bibitem{heilmeier} A.~Heilmeier, A.~Wischnewski, L.~Hermansdorfer,
+  J.~Betz, M.~Lienkamp, B.~Lohmann.
+  \emph{Minimum curvature trajectory planning and control for an
+  autonomous race car}. Vehicle System Dynamics 58(10), 2020.
+  \url{https://www.tandfonline.com/doi/full/10.1080/00423114.2019.1631455}
+\bibitem{tumftm} TUMFTM, \emph{global\_racetrajectory\_optimization}.
+  \url{https://github.com/TUMFTM/global_racetrajectory_optimization}
+\bibitem{liniger} A.~Liniger, A.~Domahidi, M.~Morari.
+  \emph{Optimization-based autonomous racing of 1:43 scale RC cars}.
+  Optimal Control Applications and Methods 36(5), 2015.
+  \url{https://github.com/alexliniger/MPCC}
+\bibitem{becker} J.~Becker et al.
+  \emph{Model- and Acceleration-based Pursuit controller for
+  high-performance autonomous racing}. ICRA 2023.
+\bibitem{forzaeth} N.~Baumann et al.
+  \emph{ForzaETH race stack: scaled autonomous head-to-head racing on
+  fully commercial off-the-shelf hardware}. 2024.
+  arXiv:2403.11784.
+\bibitem{survey} B.~D.~Evans et al.
+  \emph{Unifying F1TENTH autonomous racing: survey, methods and
+  benchmarks}. 2024. arXiv:2402.18558.
+\bibitem{cimpcc} \emph{Reduce lap time for autonomous racing with
+  curvature-integrated MPCC local trajectory planning method}. 2025.
+  arXiv:2502.03695.
+\bibitem{bayesrace} A.~Jain, M.~Morari.
+  \emph{BayesRace: learning to race autonomously using prior
+  experience}. CoRL 2020. arXiv:2005.04755.
+\bibitem{lmpc} U.~Rosolia, F.~Borrelli.
+  \emph{Autonomous racing using learning model predictive control}.
+  ACC 2017. arXiv:1610.06534.
+\bibitem{rlracing} \emph{On learning racing policies with reinforcement
+  learning}. 2025. arXiv:2504.02420.
+\bibitem{roboracer} \emph{Advancing autonomous racing: a comprehensive
+  survey of the RoboRacer (F1TENTH) platform}. 2025. arXiv:2506.15899.
+\bibitem{okelly} M.~O'Kelly, H.~Zheng, D.~Karthik, R.~Mangharam.
+  \emph{F1TENTH: an open-source evaluation environment for continuous
+  control and reinforcement learning}. NeurIPS 2019 Competition track,
+  PMLR 123, 2020.
+\end{thebibliography}
+
+\appendix
+\section{Reproduction}
+
+All numbers are reproducible from the repository root:
+
+\begin{verbatim}
+python3 -m pytest tests/ -q            # full suite
+python3 tests/test_mpc.py              # closed-loop MPC validation
+python3 tools/refine_comp_raceline.py  # regenerate + validate raceline
+python3 tools/benchmark_delay.py \
+  --raceline racelines/comp_raceline_unrefined.csv   # Table 2 / Fig. 2
+python3 tools/benchmark_delay.py       # delay sweep, current line
+python3 tools/benchmark_mpcc.py        # MPCC vs tracking MPC
+python3 tools/benchmark_map.py         # MAP LUT comparison
+\end{verbatim}
+
+\end{document}
