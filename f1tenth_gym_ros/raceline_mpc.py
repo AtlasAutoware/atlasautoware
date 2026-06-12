@@ -51,7 +51,8 @@ from pursuit_agent import find_best_raceline, load_raceline, find_nearest
 from mpc_controller import KinematicMPC, TractionGovernor, predict_state
 from map_controller import MAPController
 from velocity_profiler import velocity_profile, segment_lengths
-from raceline_refiner import refine_raceline
+from raceline_refiner import refine_raceline, map_corridors
+from grid_map import GridMap, map_path_for
 
 
 class RacelineMPC(Node):
@@ -75,6 +76,9 @@ class RacelineMPC(Node):
         self.declare_parameter('max_lat_accel', 6.0)    # m/s^2 traction-governor limit
         self.declare_parameter('actuation_delay', 0.0)  # s sensor->actuator latency
         self.declare_parameter('refine_corridor', 0.0)  # m min-curvature refinement
+        self.declare_parameter('refine_use_map', False)  # occupancy-aware corridors
+        self.declare_parameter('refine_cap', 1.2)       # m max excursion with map
+        self.declare_parameter('map_yaml', '')          # '' = auto-find in maps/
         self.declare_parameter('reprofile_speeds', False)  # recompute CSV speeds
         self.declare_parameter('profile_a_accel', 4.0)  # m/s^2 engine limit
         self.declare_parameter('profile_a_brake', 8.0)  # m/s^2 braking limit
@@ -101,10 +105,26 @@ class RacelineMPC(Node):
         self.n = len(self.rl_x)
         corridor = float(self.get_parameter('refine_corridor').value)
         if corridor > 0.0:
-            # minimum-curvature refinement (TUMFTM) within +/- corridor of the
-            # loaded line — validate wall clearance before enabling on a car
+            # minimum-curvature refinement (TUMFTM).  With refine_use_map the
+            # corridor becomes per-point/per-side from measured wall clearance
+            # (corridor = required margin, refine_cap = max excursion) — wider
+            # where the track allows, guaranteed margin where it doesn't.
+            bounds = corridor
+            if self.get_parameter('refine_use_map').value:
+                myaml = self.get_parameter('map_yaml').value or map_path_for(rl)
+                if myaml:
+                    bounds = map_corridors(
+                        self.rl_x, self.rl_y, GridMap.load(myaml),
+                        margin=corridor,
+                        cap=float(self.get_parameter('refine_cap').value))
+                    self.get_logger().info(
+                        f'occupancy-aware corridors from {os.path.basename(myaml)} '
+                        f'(margin {corridor:.2f} m)')
+                else:
+                    self.get_logger().warning(
+                        'refine_use_map set but no map found — scalar corridor')
             self.rl_x, self.rl_y, self.rl_hdg, self.rl_curv = refine_raceline(
-                self.rl_x, self.rl_y, corridor=corridor)
+                self.rl_x, self.rl_y, corridor=bounds)
             self.get_logger().info(
                 f'raceline refined (min-curvature, corridor {corridor:.2f} m)')
         if self.get_parameter('reprofile_speeds').value:
