@@ -1,6 +1,8 @@
 # AtlasAutoware: An Integrated, CPU-Only Autonomous Racing Stack for 1/10-Scale Vehicles with Component-Wise Closed-Loop Evaluation
 
-**Author:** Eshan Iyer [affiliation and contact to be completed]
+**Author:** Eshan Iyer
+**Affiliation:** Thomas Jefferson High School for Science and Technology (TJHSST), Alexandria, VA
+**Contact:** 2027eiyer@tjhsst.edu
 **Code:** https://github.com/AtlasAutoware/atlasautoware
 
 ---
