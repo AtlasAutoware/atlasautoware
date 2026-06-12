@@ -139,6 +139,9 @@ raceline_mpc:
     drive_topic: '/drive'
     imu_topic: '/oakd/imu'      # enables the traction governor
     speed_scale_topic: '/supervisor/speed_scale'  # DEGRADED -> slow down
+    enable_behavior: false      # head-to-head: GB_TRACK/TRAILING/OVERTAKE
+    opponent_topic: '/camera_opponents_poses'  # (turn on for races with
+                                # opponents; solo time-trial path unchanged)
     actuation_delay: 0.10       # s latency — measure it: data_logger +
                                 # tools/sysid_report.py (S-turn drive)
     max_lat_accel: 6.0          # m/s^2 grip budget (governor + profiler)
