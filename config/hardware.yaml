@@ -112,6 +112,14 @@ particle_filter:
     n_particles: 1500
     subsample: 20               # every Nth beam (1.3 ms/update at 18 beams)
 
+navigator:                      # goal-driving mode: run INSTEAD of raceline_mpc
+  ros__parameters:              #   ros2 launch ... car_bringup_launch.py use_racing:=false
+    map_yaml: ''                #   ros2 run f1tenth_gym_ros navigator --ros-args --params-file ...
+    odom_topic: '/pf/pose/odom' # then set goals with RViz "2D Goal Pose"
+    goal_topic: '/goal_pose'
+    scan_topic: '/scan'
+    drive_topic: '/drive'
+
 raceline_mpc:
   ros__parameters:
     scan_topic: '/scan'

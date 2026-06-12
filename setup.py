@@ -39,6 +39,7 @@ setup(
             'rc_monitor = f1tenth_gym_ros.rc_monitor:main',
             'sidewalk_follow = f1tenth_gym_ros.sidewalk_follow:main',
             'particle_filter = f1tenth_gym_ros.particle_filter:main',
+            'navigator = f1tenth_gym_ros.navigator:main',
         ],
     },
 )
