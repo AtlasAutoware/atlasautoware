@@ -44,6 +44,27 @@ except Exception:                              # pragma: no cover
     _HAVE_OSQP = False
 
 
+def predict_state(x, y, yaw, v, steer, v_cmd, delay, wheelbase,
+                  a_accel=4.0, a_brake=8.0, dt=0.01):
+    """Forward-predict the pose by the actuation latency (delay compensation).
+
+    By the time a command reaches the wheels (serial links, servo lag, ESC
+    ramp — typically 50-150 ms on a real car) the car is no longer where the
+    controller planned from, so every solve chases a stale state.  The fix
+    every race stack uses: integrate the kinematic bicycle forward by the
+    measured delay under the *last commanded* steer + speed target, and solve
+    from the predicted state instead.  Costs microseconds; pure (no ROS).
+    """
+    steps = int(round(float(delay) / dt))
+    for _ in range(steps):
+        a = min(max((v_cmd - v) / dt, -a_brake), a_accel)
+        x += v * math.cos(yaw) * dt
+        y += v * math.sin(yaw) * dt
+        yaw += v * math.tan(steer) / wheelbase * dt
+        v = max(0.0, v + a * dt)
+    return x, y, yaw, v
+
+
 class TractionGovernor:
     """Speed governor from measured yaw rate — the IMU's seat in the control loop.
 

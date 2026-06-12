@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from velocity_profiler import velocity_profile, segment_lengths  # noqa: E402
 from map_controller import MAPController, build_lat_accel_lut    # noqa: E402
+from mpc_controller import predict_state                         # noqa: E402
 from closed_loop import load_raceline, run_lap                   # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -139,6 +140,44 @@ def test_map_closed_loop_lap():
     assert res['completed'], 'did not complete a lap'
     assert res['xte_mean'] < 0.15, f"loose tracking ({res['xte_mean']:.2f} m)"
     assert res['xte_max'] < 0.6, f"ran wide ({res['xte_max']:.2f} m)"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Actuation-delay compensation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_predict_state_straight_line():
+    # constant speed, zero steer: the car just travels v*delay forward
+    x, y, yaw, v = predict_state(0.0, 0.0, 0.0, 4.0, 0.0, 4.0, 0.1, 0.33)
+    assert abs(x - 0.4) < 1e-9 and y == 0.0 and yaw == 0.0 and v == 4.0
+    assert predict_state(1.0, 2.0, 0.3, 4.0, 0.1, 4.0, 0.0, 0.33) == \
+        (1.0, 2.0, 0.3, 4.0)                            # zero delay: identity
+
+
+def test_delay_compensation_recovers_tracking():
+    # 100 ms actuator latency wrecks the uncompensated lap; predicting the
+    # state by the delay before each control step must restore it
+    rx, ry, rh, rc, rv = load_raceline(
+        os.path.join(REPO, 'racelines', 'comp_raceline.csv'))
+    ctl = _ctl()
+    ctl.set_raceline(rx, ry, rv)
+    delay = 0.10
+    plain = run_lap(ctl.control, rx, ry, rh, actuator_delay=delay)
+
+    last = {'steer': 0.0, 'v': 2.0}
+
+    def compensated(px, py, yaw, v, j):
+        px, py, yaw, v = predict_state(px, py, yaw, v, last['steer'],
+                                       last['v'], delay, 0.33)
+        j = int(np.argmin((rx - px) ** 2 + (ry - py) ** 2))
+        steer, v_t = ctl.control(px, py, yaw, v, j)
+        last['steer'], last['v'] = float(steer), float(v_t)
+        return steer, v_t
+
+    comp = run_lap(compensated, rx, ry, rh, actuator_delay=delay)
+    assert comp['completed'] and plain['completed']
+    assert comp['xte_max'] < plain['xte_max'] * 0.75    # clearly tighter
+    assert comp['lap_time'] <= plain['lap_time'] + 0.1  # and no slower
 
 
 if __name__ == '__main__':

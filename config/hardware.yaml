@@ -63,6 +63,8 @@ raceline_mpc:
     odom_topic: '/pf/pose/odom' # map-frame pose from your localization
     drive_topic: '/drive'
     imu_topic: '/oakd/imu'      # enables the traction governor
+    actuation_delay: 0.10       # s sensor->actuator latency (measure on YOUR car:
+                                # step-steer test, lidar timestamp vs yaw-rate onset)
     max_lat_accel: 6.0          # m/s^2 grip budget (governor + profiler)
     aeb_decel: 6.0              # m/s^2 assumed braking for dynamic AEB range
     reprofile_speeds: true      # friction-limited speeds from curvature at load

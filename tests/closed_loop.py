@@ -41,11 +41,14 @@ def cross_track(px, py, rx, ry, j):
 def run_lap(control_fn, rx, ry, rh, wheelbase=0.33,
             start_offset=(0.3, -0.2, 0.0), v0=2.0, dt=0.02,
             max_steps=12000, settle=100,
-            a_accel=4.0, a_brake=8.0):
+            a_accel=4.0, a_brake=8.0, actuator_delay=0.0):
     """One lap under control_fn; returns metrics + traces.
 
     control_fn(px, py, yaw, v, nearest_idx) -> (steer, v_target).  The plant
     is the kinematic bicycle; speed tracks v_target under accel/brake limits.
+    `actuator_delay` (s) holds each command in a FIFO before the plant sees
+    it — the sensor-to-actuator latency of a real car (serial links, servo,
+    ESC ramping), for testing delay compensation.
     Returns dict with completed, lap_time, xte (full trace), idx (nearest
     raceline index per step), xte_mean / xte_max (post-settle).
     """
@@ -57,6 +60,8 @@ def run_lap(control_fn, rx, ry, rh, wheelbase=0.33,
     prev_j = cum = 0
     t = 0.0
     xte, idx = [], []
+    delay_steps = int(round(actuator_delay / dt))
+    pipeline = [(0.0, v0)] * delay_steps               # commands in flight
     for _ in range(max_steps):
         j = int(np.argmin((rx - px) ** 2 + (ry - py) ** 2))
         d = j - prev_j
@@ -65,7 +70,11 @@ def run_lap(control_fn, rx, ry, rh, wheelbase=0.33,
         if 0 < d < n / 2:
             cum += d
         prev_j = j
-        steer, v_t = control_fn(px, py, yaw, v, j)
+        cmd = control_fn(px, py, yaw, v, j)
+        if delay_steps:
+            pipeline.append(cmd)
+            cmd = pipeline.pop(0)
+        steer, v_t = cmd
         a = float(np.clip((v_t - v) / dt, -a_brake, a_accel))
         px += v * math.cos(yaw) * dt
         py += v * math.sin(yaw) * dt

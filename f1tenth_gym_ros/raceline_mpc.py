@@ -48,7 +48,7 @@ from transforms3d.euler import quat2euler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pursuit_agent import find_best_raceline, load_raceline, find_nearest
-from mpc_controller import KinematicMPC, TractionGovernor
+from mpc_controller import KinematicMPC, TractionGovernor, predict_state
 from map_controller import MAPController
 from velocity_profiler import velocity_profile, segment_lengths
 
@@ -72,6 +72,7 @@ class RacelineMPC(Node):
         self.declare_parameter('min_speed', 0.6)        # m/s creep floor when rolling
         self.declare_parameter('imu_topic', '')         # e.g. /oakd/imu; '' = off (sim)
         self.declare_parameter('max_lat_accel', 6.0)    # m/s^2 traction-governor limit
+        self.declare_parameter('actuation_delay', 0.0)  # s sensor->actuator latency
         self.declare_parameter('reprofile_speeds', False)  # recompute CSV speeds
         self.declare_parameter('profile_a_accel', 4.0)  # m/s^2 engine limit
         self.declare_parameter('profile_a_brake', 8.0)  # m/s^2 braking limit
@@ -86,6 +87,8 @@ class RacelineMPC(Node):
         self.aeb_cone   = float(self.get_parameter('aeb_cone').value)
         self.aeb_decel  = float(self.get_parameter('aeb_decel').value)
         self.min_speed  = float(self.get_parameter('min_speed').value)
+        self.delay      = float(self.get_parameter('actuation_delay').value)
+        self._last_cmd  = (0.0, 0.0)                    # published (steer, speed)
 
         # ── raceline ───────────────────────────────────────────────────────────
         rl = self.get_parameter('raceline').value or self._find_raceline()
@@ -192,24 +195,26 @@ class RacelineMPC(Node):
         cone = self._cone_mask
         return float(r[cone].min()) if cone.any() else 30.0
 
-    # ── MAP fallback (when MPC unavailable / a solve fails) ────────────────────
-    def _map_fallback(self):
-        return self.map_ctl.control(self.x, self.y, self.yaw,
-                                    self.speed, self.nearest)
-
     # ── control loop ───────────────────────────────────────────────────────────
     def _loop(self):
         if self.scan is None or not self.have_odom:
             return
-        self.nearest = find_nearest(self.x, self.y, self.rl_x, self.rl_y, self.nearest)
+        # delay compensation: solve from where the car will be when the
+        # command actually reaches the wheels, not where it was last measured
+        px, py, pyaw, pv = self.x, self.y, self.yaw, self.speed
+        if self.delay > 0.0:
+            px, py, pyaw, pv = predict_state(
+                px, py, pyaw, pv, self._last_cmd[0], self._last_cmd[1],
+                self.delay, self.L)
+        self.nearest = find_nearest(px, py, self.rl_x, self.rl_y, self.nearest)
 
         steer = v_cmd = None
         if self.mpc.available:
-            out = self.mpc.solve((self.x, self.y, self.yaw, self.speed), self.nearest)
+            out = self.mpc.solve((px, py, pyaw, pv), self.nearest)
             if out is not None:
                 steer, v_cmd = out
         if steer is None:                               # MPC off or solve failed
-            steer, v_cmd = self._map_fallback()
+            steer, v_cmd = self.map_ctl.control(px, py, pyaw, pv, self.nearest)
 
         v_cmd = float(v_cmd) * self.v_scale
 
@@ -234,6 +239,7 @@ class RacelineMPC(Node):
         msg.drive.steering_angle = float(np.clip(steer, -self.max_steer, self.max_steer))
         msg.drive.speed = float(v_cmd)
         self.drive_pub.publish(msg)
+        self._last_cmd = (msg.drive.steering_angle, msg.drive.speed)
 
         # lap counter (index wraps past start/finish)
         if self._prev_near > self.n - 12 and self.nearest < 12:
