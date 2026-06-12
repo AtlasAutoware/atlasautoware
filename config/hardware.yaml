@@ -44,6 +44,14 @@ rplidar_node:
     range_min: 0.10
     range_max: 25.0
     angle_offset: 0.0           # rad CCW, mounting yaw correction
+    deskew_odom_topic: '/ekf/odom'  # per-beam motion correction; '' = off
+
+velocity_ekf:
+  ros__parameters:
+    imu_topic: '/oakd/imu'
+    wheel_odom_topic: '/vesc/odom'  # only published by the vesc-uart backend
+    out_topic: '/ekf/odom'
+    l_r: 0.17145                # m, CG to rear axle
 
 oakd_camera:
   ros__parameters:
@@ -56,6 +64,17 @@ oakd_camera:
     imu_topic: '/oakd/imu'
     camera_frame: 'oakd_rgb'
     imu_frame: 'oakd_imu'
+    yolo_blob: ''               # compiled .blob -> YOLO on the camera's VPU
+    yolo_conf: 0.4              # (blobconverter from the trained ONNX)
+    yolo_size: 416
+
+camera_perception:
+  ros__parameters:
+    image_topic: '/oakd/rgb'
+    odom_topic: '/pf/pose/odom'
+    backend: 'auto'             # auto | tensorrt | cuda | cpu — auto prefers a
+                                # .engine built on the Jetson (trtexec --fp16),
+                                # then cv2.dnn CUDA, then CPU
 
 raceline_mpc:
   ros__parameters:
@@ -63,7 +82,15 @@ raceline_mpc:
     odom_topic: '/pf/pose/odom' # map-frame pose from your localization
     drive_topic: '/drive'
     imu_topic: '/oakd/imu'      # enables the traction governor
-    max_lat_accel: 6.0          # m/s^2 grip budget for the governor
+    actuation_delay: 0.10       # s sensor->actuator latency (measure on YOUR car:
+                                # step-steer test, lidar timestamp vs yaw-rate onset)
+    max_lat_accel: 6.0          # m/s^2 grip budget (governor + profiler)
     aeb_decel: 6.0              # m/s^2 assumed braking for dynamic AEB range
+    refine_corridor: 0.0        # m min-curvature refinement; 0 = off.  Enable
+                                # (start 0.15) only after checking wall clearance
+    reprofile_speeds: true      # friction-limited speeds from curvature at load
+    profile_a_accel: 4.0        # m/s^2 engine limit
+    profile_a_brake: 8.0        # m/s^2 braking limit
+    profile_v_max: 8.0          # m/s profile ceiling
     v_scale: 0.5                # global speed cap — raise as confidence grows
     control_hz: 50.0
