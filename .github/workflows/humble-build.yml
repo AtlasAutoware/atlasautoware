@@ -5,7 +5,7 @@ name: ROS 2 Humble build
 # package, run the pure-logic test suite on Python 3.10, and install the
 # upstream f1tenth_gym the way the Dockerfile does (the legacy gym==0.19.0 /
 # numpy<=1.22 install is the part most likely to break on a Python 3.10 base).
-on: [push, pull_request]
+on: [push]
 
 jobs:
   humble-build:
@@ -38,7 +38,7 @@ jobs:
 
       - name: Unit tests (pure-logic suite, Python 3.10)
         run: |
-          pip3 install numpy scipy osqp pytest
+          pip3 install numpy scipy osqp pillow pytest
           python3 -m pytest src/f1tenth_gym_ros/tests -q
 
       - name: Sim dependency install (f1tenth_gym on Python 3.10)
