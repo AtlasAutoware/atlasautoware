@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-FROM ros:foxy
+FROM ros:humble
 
 SHELL ["/bin/bash", "-c"]
 
@@ -32,11 +32,17 @@ RUN apt-get update --fix-missing && \
                        python3-pip \
                        libeigen3-dev \
                        tmux \
-                       ros-foxy-rviz2
+                       ros-humble-rviz2
 RUN apt-get -y dist-upgrade
 RUN pip3 install transforms3d
 
 # f1tenth gym
+# Upstream f1tenth_gym pins legacy gym (==0.19.0) and numpy<=1.22, whose
+# packaging metadata fails to install under the newer pip/setuptools that a
+# Python 3.10 (Humble) base can carry.  Pin the build frontend to versions
+# that still resolve the legacy editable install (the well-known gym
+# 0.19/0.21 packaging bug); these also build the ament_python package below.
+RUN pip3 install "pip<24.1" "setuptools==65.5.0" "wheel<0.40.0"
 RUN git clone https://github.com/f1tenth/f1tenth_gym
 RUN cd f1tenth_gym && \
     pip3 install -e .
@@ -44,10 +50,10 @@ RUN cd f1tenth_gym && \
 # ros2 gym bridge
 RUN mkdir -p sim_ws/src/f1tenth_gym_ros
 COPY . /sim_ws/src/f1tenth_gym_ros
-RUN source /opt/ros/foxy/setup.bash && \
+RUN source /opt/ros/humble/setup.bash && \
     cd sim_ws/ && \
     apt-get update --fix-missing && \
-    rosdep install -i --from-path src --rosdistro foxy -y && \
+    rosdep install -i --from-path src --rosdistro humble -y && \
     colcon build
 
 WORKDIR '/sim_ws'

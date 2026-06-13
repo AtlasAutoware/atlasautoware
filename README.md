@@ -7,7 +7,7 @@ detection, and a hardware bringup layer (Jetson + OAK-D Pro + RPLidar + VESC)
 so the same nodes that win in sim drive the physical car.
 
 Built on the [f1tenth_gym_ros](https://github.com/f1tenth/f1tenth_gym_ros)
-simulation bridge (ROS 2 Foxy).
+simulation bridge (ROS 2 Humble).
 
 ```
                  ┌── sim:  gym_bridge (f1tenth_gym) ──────────────┐
@@ -47,10 +47,10 @@ Tooling: `tools/auto_tune.py`, `tools/benchmark_lap.py`, and a live dashboard
 
 ## Quickstart — simulation
 
-Supported: Ubuntu native with ROS 2 Foxy, or any OS via Docker (NVIDIA GPU
-with `rocker`, or noVNC without).
+Supported: Ubuntu 22.04 native with ROS 2 Humble, or any OS via Docker
+(NVIDIA GPU with `rocker`, or noVNC without).
 
-**Native (Ubuntu + ROS 2 Foxy):**
+**Native (Ubuntu 22.04 + ROS 2 Humble):**
 ```bash
 # dependencies
 git clone https://github.com/f1tenth/f1tenth_gym && cd f1tenth_gym && pip3 install -e . && cd ..
@@ -59,9 +59,9 @@ mkdir -p $HOME/sim_ws/src && cd $HOME/sim_ws/src
 git clone <this repo>
 # point map_path in config/sim.yaml at <your_home>/sim_ws/src/atlasautoware/maps/levine
 cd $HOME/sim_ws
-rosdep install -i --from-path src --rosdistro foxy -y
+rosdep install -i --from-path src --rosdistro humble -y
 colcon build
-source /opt/ros/foxy/setup.bash && source install/local_setup.bash
+source /opt/ros/humble/setup.bash && source install/local_setup.bash
 ros2 launch f1tenth_gym_ros gym_bridge_launch.py
 ```
 

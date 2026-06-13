@@ -43,7 +43,7 @@ def dx(cmd, timeout=120):
 
 
 def ros_prefix():
-    return ('source /opt/ros/foxy/setup.bash; '
+    return ('source /opt/ros/humble/setup.bash; '
             'source /sim_ws/install/setup.bash 2>/dev/null; '
             'cd /sim_ws/src/f1tenth_gym_ros; ')
 

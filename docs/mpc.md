@@ -24,8 +24,8 @@ receding-horizon repeats next tick.
 # default is Stanley; opt in to MPC:
 ros2 run f1tenth_gym_ros race_agent --ros-args -p controller:=mpc
 ```
-**Dependency:** `pip3 install osqp==0.6.3` (the 0.6.x line has prebuilt py38
-wheels; newer osqp needs a build toolchain the foxy image lacks). If osqp is
+**Dependency:** `pip3 install osqp==0.6.3` (the 0.6.x line has prebuilt py310
+wheels; newer osqp needs a build toolchain the humble image lacks). If osqp is
 missing, the agent logs a warning and **falls back to Stanley** — it never
 hard-breaks. A runtime solve failure also falls back, per-tick, silently.
 

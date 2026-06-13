@@ -1,0 +1,50 @@
+name: ROS 2 Humble build
+
+# Exercises the actual ROS 2 Humble build (the Docker/draft-pdf workflows do
+# not): resolve dependencies with rosdep, colcon build the ament_python
+# package, run the pure-logic test suite on Python 3.10, and install the
+# upstream f1tenth_gym the way the Dockerfile does (the legacy gym==0.19.0 /
+# numpy<=1.22 install is the part most likely to break on a Python 3.10 base).
+on: [push]
+
+jobs:
+  humble-build:
+    runs-on: ubuntu-latest
+    container:
+      image: ros:humble
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: src/f1tenth_gym_ros
+
+      - name: Install build tooling
+        run: |
+          apt-get update
+          apt-get install -y python3-pip python3-colcon-common-extensions git
+
+      - name: Resolve ROS dependencies (rosdep)
+        run: |
+          rosdep update
+          rosdep install -i --from-path src --rosdistro humble -y
+
+      - name: colcon build
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon build
+
+      - name: Unit tests (pure-logic suite, Python 3.10)
+        run: |
+          pip3 install numpy scipy osqp pillow pytest
+          python3 -m pytest src/f1tenth_gym_ros/tests -q
+
+      - name: Sim dependency install (f1tenth_gym on Python 3.10)
+        run: |
+          # Mirror the Dockerfile: legacy gym==0.19.0 / numpy<=1.22 needs an
+          # older build frontend to resolve on Python 3.10.
+          pip3 install "pip<24.1" "setuptools==65.5.0" "wheel<0.40.0"
+          git clone https://github.com/f1tenth/f1tenth_gym
+          cd f1tenth_gym && pip3 install -e .
