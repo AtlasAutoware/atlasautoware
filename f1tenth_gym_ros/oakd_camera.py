@@ -3,7 +3,7 @@ OAK-D Pro driver — RGB frames + onboard IMU for the real car.
 =============================================================
 
 Publishes from a Luxonis OAK-D Pro over the `depthai` Python API (pure pip,
-works on Foxy — no depthai-ros packages needed on the Jetson):
+works on Humble — no depthai-ros packages needed on the Jetson):
 
   /oakd/rgb          sensor_msgs/Image  (bgr8)   -> camera_perception YOLO
   /oakd/camera_info  sensor_msgs/CameraInfo      -> pinhole back-projection

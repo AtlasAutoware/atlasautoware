@@ -63,7 +63,7 @@ def clamp(name, v):
 
 
 def regen_raceline(cfg):
-    cmd = ('source /opt/ros/foxy/setup.bash; source /sim_ws/install/setup.bash 2>/dev/null; '
+    cmd = ('source /opt/ros/humble/setup.bash; source /sim_ws/install/setup.bash 2>/dev/null;'
            f'cd {REPO}; python3 f1tenth_gym_ros/raceline_optimizer.py '
            f'--map maps/comp_track.yaml --output {RL} --seed {SEED[0]} {SEED[1]} '
            f'--margin {cfg["margin"]} --apex-bias {cfg["apex_bias"]} '
@@ -99,7 +99,7 @@ def write_controller(cfg):
 
 
 def benchmark(bench_time):
-    cmd = ('source /opt/ros/foxy/setup.bash; source /sim_ws/install/setup.bash 2>/dev/null; '
+    cmd = ('source /opt/ros/humble/setup.bash; source /sim_ws/install/setup.bash 2>/dev/null;'
            f'cd {REPO}; python3 tools/benchmark_lap.py --time {bench_time}')
     try:
         r = subprocess.run(['bash', '-lc', cmd], capture_output=True, text=True,

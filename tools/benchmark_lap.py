@@ -49,14 +49,14 @@ def main():
     time.sleep(1.0)
     if os.path.exists(STATE):
         os.remove(STATE)
-    sh('source /opt/ros/foxy/setup.bash; source /sim_ws/install/setup.bash 2>/dev/null; '
+    sh('source /opt/ros/humble/setup.bash; source /sim_ws/install/setup.bash 2>/dev/null;'
        'timeout 3 ' + RESET + ' >/dev/null 2>&1')
     time.sleep(0.5)
 
     # launch agent (inherits ROS env from the caller)
     proc = subprocess.Popen(
         ['bash', '-lc',
-         'source /opt/ros/foxy/setup.bash; source /sim_ws/install/setup.bash 2>/dev/null; '
+         'source /opt/ros/humble/setup.bash; source /sim_ws/install/setup.bash 2>/dev/null;'
          'cd %s; python3 f1tenth_gym_ros/race_agent.py' % REPO],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
