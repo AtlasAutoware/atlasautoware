@@ -1,0 +1,343 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+
+\title{AtlasAutoware System Guide for Beginners\\
+(How the Self-Driving Racecar Works and What Every Code File Does)}
+\author{AtlasAutoware Repository Documentation}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Purpose of this document}
+This guide explains the AtlasAutoware codebase for someone new to self-driving cars.
+It covers:
+\begin{itemize}
+  \item core autonomous-driving vocabulary,
+  \item how the end-to-end racing stack works,
+  \item what runs in simulation vs. real hardware,
+  \item the main control loop that runs on the vehicle,
+  \item and what each code file is responsible for.
+\end{itemize}
+
+\section{Beginner overview: how a self-driving racecar works}
+A self-driving car continuously repeats a control cycle:
+\begin{enumerate}
+  \item \textbf{Sense}: read lidar, camera, IMU, and odometry.
+  \item \textbf{Estimate state}: compute where the car is, how fast it is moving, and how it is rotating.
+  \item \textbf{Plan}: select a path and target speed (here, a precomputed raceline with safety logic).
+  \item \textbf{Control}: compute steering and speed commands.
+  \item \textbf{Actuate}: send commands to motor controller and steering.
+  \item \textbf{Repeat}: run again at fixed rate (about 50 Hz in this stack).
+\end{enumerate}
+
+AtlasAutoware is built for F1TENTH (1/10-scale racing), but it uses the same architecture patterns used in full-size autonomous systems: modular sensing, planning, control, and safety layers.
+
+\section{Vocabulary and core terms}
+\begin{description}[leftmargin=2.2cm,style=nextline]
+  \item[ROS 2] Middleware that lets independent software nodes exchange messages over topics.
+  \item[Node] A program process with one job (for example, lidar driver or controller).
+  \item[Topic] Named message channel (example: \texttt{/scan}, \texttt{/drive}).
+  \item[Publisher] Node that sends messages to a topic.
+  \item[Subscriber] Node that receives messages from a topic.
+  \item[Message] Typed data packet (LaserScan, Odometry, AckermannDriveStamped, etc.).
+  \item[Frame] Coordinate system name in TF (example: \texttt{map}, \texttt{base\_link}).
+  \item[TF] ROS transform tree that relates frames over time.
+  \item[Lidar] Laser range sensor measuring distances around the car.
+  \item[IMU] Inertial Measurement Unit (accelerometer + gyroscope).
+  \item[Odometry] Motion estimate (velocity/pose) from wheel or state estimator.
+  \item[Raceline] Fastest practical closed-loop path around a track.
+  \item[Curvature] How sharply a path bends; high curvature means tighter turn (denoted $\kappa$).
+  \item[Trajectory] Time-parameterized path (position and often speed profile).
+  \item[Waypoint] One sampled point along a path/raceline.
+  \item[Control loop] Repeating cycle that computes commands from latest sensor/state data.
+  \item[MPC] Model Predictive Control; solves an optimization each cycle to track path with constraints.
+  \item[MPCC] Model Predictive Contouring Control; MPC variant optimizing contouring/lag errors.
+  \item[OSQP] Quadratic-program solver used by MPC in this repository.
+  \item[Fallback controller] Backup controller used when primary solver/path fails.
+  \item[MAP controller] Model- and Acceleration-based Pursuit; robust geometric+tire-aware fallback.
+  \item[Pure Pursuit] Geometric path-following controller using lookahead point.
+  \item[Stanley controller] Steering law based on heading + cross-track error.
+  \item[AEB] Automatic Emergency Braking; stops if obstacle is too close ahead.
+  \item[Latency compensation] Predicting future vehicle state to account for actuation delay.
+  \item[Traction governor] Speed scaler that reduces command when measured lateral acceleration exceeds grip budget.
+  \item[Occupancy grid] 2D map where cells are free, occupied, or unknown.
+  \item[SLAM] Simultaneous Localization and Mapping.
+  \item[Loop closure] SLAM correction when revisiting known places.
+  \item[Deskew] Correcting rolling lidar scan distortion caused by motion during scan.
+  \item[EKF] Extended Kalman Filter; state estimator combining model + noisy sensor measurements.
+  \item[Slip] Wheel speed diverges from true ground speed due to tire traction loss.
+  \item[Friction limit] Maximum tire force before sliding.
+  \item[Friction-limited profile] Speed profile that respects lateral/longitudinal grip limits.
+  \item[Disparity extender] Follow-the-gap safety logic inflating obstacle edges by vehicle width.
+  \item[YOLO] Real-time object detector used for opponent car perception.
+  \item[TensorRT] NVIDIA runtime for optimized neural inference on Jetson GPU.
+  \item[VESC] Motor controller for throttle/motor actuation and telemetry.
+  \item[PCA9685] PWM board for generating servo/PPM pulses.
+\end{description}
+
+\section{System architecture in this repository}
+\subsection{Main execution modes}
+\begin{itemize}
+  \item \textbf{Simulation mode}: \texttt{gym\_bridge} publishes simulated lidar/odom and receives \texttt{/drive}.
+  \item \textbf{Real-car mode}: hardware drivers publish real sensors and \texttt{drive\_node} actuates the car.
+  \item \textbf{Mapping mode}: \texttt{slam\_toolbox} + \texttt{mapping\_driver} + \texttt{track\_learner} build map/raceline.
+  \item \textbf{Racing mode}: \texttt{raceline\_mpc} follows optimized raceline with safety/fallback logic.
+\end{itemize}
+
+\subsection{Primary dataflow on real vehicle}
+\begin{enumerate}
+  \item \texttt{rplidar\_node} publishes \texttt{/scan}.
+  \item \texttt{oakd\_camera} publishes \texttt{/oakd/rgb}, \texttt{/oakd/camera\_info}, \texttt{/oakd/imu}.
+  \item \texttt{velocity\_ekf} fuses IMU + wheel odometry and publishes \texttt{/ekf/odom}.
+  \item Localization (typically particle filter, external) publishes map-frame odometry (configured as \texttt{/pf/pose/odom}).
+  \item \texttt{raceline\_mpc} consumes odometry + scan (+ optional IMU), computes \texttt{/drive}.
+  \item \texttt{drive\_node} consumes \texttt{/drive}, sends hardware actuation through PCA9685 or direct VESC UART.
+\end{enumerate}
+
+\section{The main code that runs the vehicle loop}
+The core race-time loop on real car is in \texttt{f1tenth\_gym\_ros/raceline\_mpc.py}:
+\begin{itemize}
+  \item Node class: \texttt{RacelineMPC}
+  \item Timer callback: \texttt{\_loop()} at \texttt{control\_hz} (default 50 Hz)
+\end{itemize}
+
+Each cycle, \texttt{\_loop()} does:
+\begin{enumerate}
+  \item Validate fresh scan and odometry.
+  \item Predict current state forward by actuation delay (command-buffer based latency compensation).
+  \item Find nearest raceline index.
+  \item Try MPC solve (\texttt{KinematicMPC.solve}); if unavailable/fails, use \texttt{MAPController.control} fallback.
+  \item Scale speed by \texttt{v\_scale}.
+  \item Apply traction governor scaling from IMU yaw-rate if enabled.
+  \item Run AEB check in forward cone; force stop if obstacle within dynamic stop distance.
+  \item Publish \texttt{AckermannDriveStamped} to \texttt{/drive}.
+\end{enumerate}
+
+The actuator endpoint loop is in \texttt{f1tenth\_gym\_ros/drive\_node.py}:
+\begin{itemize}
+  \item Subscribes to \texttt{/drive}.
+  \item Converts speed/steering to hardware commands.
+  \item Enforces arming hold, watchdog timeout, and neutral-on-shutdown safety.
+\end{itemize}
+
+Together, these two files implement the practical real-car loop: \emph{compute command} then \emph{execute command safely}.
+
+\section{Detailed file-by-file code reference}
+\subsection{Core runtime package: \texttt{f1tenth\_gym\_ros/}}
+\begin{longtable}{p{0.30\linewidth}p{0.66\linewidth}}
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endhead
+\texttt{\_\_init\_\_.py} & Package marker for Python module import. \\
+\texttt{camera\_perception.py} & YOLO opponent perception node for real-car operation. Supports TensorRT, CUDA, or CPU inference; converts image detections to relative/world opponent positions; publishes marker and pose topics for race logic. \\
+\texttt{drive\_node.py} & Unified actuation node. Auto-detects PCA9685 vs VESC backend, applies throttle/steer mapping, watchdog neutraling, startup arming delay, and optional VESC telemetry publish. \\
+\texttt{gym\_bridge.py} & Simulation bridge between f1tenth gym and ROS topics. Publishes scans/odom/TF and accepts drive commands; supports one or two agents. \\
+\texttt{map\_controller.py} & Model- and Acceleration-based Pursuit (MAP) fallback controller. Builds lateral-acceleration LUT and inverts desired acceleration to steering with curvature-aware lookahead. \\
+\texttt{mapping\_driver.py} & Conservative autonomous mapper using disparity-extender gap-following to produce safe SLAM laps. \\
+\texttt{mpc\_controller.py} & Kinematic LTV-MPC implementation, latency prediction utility, and traction governor. Builds persistent OSQP QP for fast repeated solves. \\
+\texttt{mpcc\_controller.py} & MPCC implementation (contouring-control variant) for advanced optimization experiments/benchmarks. \\
+\texttt{oakd\_camera.py} & OAK-D Pro driver node. Publishes RGB, camera intrinsics, IMU, and optional on-device YOLO detections from Myriad X VPU. \\
+\texttt{opponent\_driver.py} & Secondary/opponent vehicle driver for two-car simulation scenarios and race-agent testing. \\
+\texttt{pca9685.py} & Low-level PCA9685 PWM driver and conversion helpers from desired speed/steer to pulse widths. Pure logic, unit tested. \\
+\texttt{pursuit\_agent.py} & Progressive-learning racing agent and shared raceline utilities (load/save/find nearest/lookahead). Used by other modules for common raceline operations. \\
+\texttt{race\_agent.py} & Opponent-aware race policy node with CRUISE/ATTACK/DEFEND/EVADE strategy integration and visualization outputs. \\
+\texttt{race\_brain.py} & Pure-logic opponent tracking and strategic decision engine; lidar clustering, track association, fusion with camera, and mode decisions. \\
+\texttt{raceline\_mpc.py} & Main competition time-trial node. Loads raceline, optional refinement and reprofile, runs MPC with MAP fallback, traction governor, and lidar AEB, then publishes drive commands. \\
+\texttt{raceline\_optimizer.py} & Offline map-to-raceline optimizer: corridor extraction, centerline building, min-curvature optimization, and speed profiling to write raceline CSVs. \\
+\texttt{raceline\_refiner.py} & Corridor-bounded minimum-curvature refinement on an existing raceline. \\
+\texttt{rplidar\_node.py} & RPLidar ROS driver; bins irregular scan points into fixed-angle LaserScan grid, optional EKF-based deskew, auto-reconnect thread. \\
+\texttt{scan\_deskew.py} & Beam-wise geometric deskew utilities for correcting lidar motion distortion during each scan revolution. \\
+\texttt{spliner.py} & Frenet-frame overtaking-path deformation helper (``spliner'' strategy). \\
+\texttt{track\_learner.py} & Live raceline learner during mapping sessions. Watches \texttt{/map}, periodically runs optimizer, tracks best lap estimate, and promotes best raceline. \\
+\texttt{velocity\_ekf.py} & EKF state estimator for body-frame velocities and yaw-rate with slip-aware wheel-speed gating and nonholonomic pseudo-measurement. \\
+\texttt{velocity\_profiler.py} & Friction-limited forward-backward velocity profile generator over curvature/path length. \\
+\texttt{vesc\_protocol.py} & VESC UART packet encode/decode, command builders, telemetry parsing. Pure logic, hardware-independent. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Launch files: \texttt{launch/}}
+\begin{longtable}{p{0.30\linewidth}p{0.66\linewidth}}
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endhead
+\texttt{car\_bringup\_launch.py} & Real-car stack launcher. Starts lidar, camera, drive node, EKF, and raceline MPC with configurable toggles and static sensor transforms. \\
+\texttt{gym\_bridge\_launch.py} & Standard simulation launch with gym bridge, map server/lifecycle manager, RViz, and robot state publishers. \\
+\texttt{headless\_bridge\_launch.py} & Simulation launch without RViz (useful for noVNC/benchmarking/automation environments). \\
+\texttt{slam\_mapping\_launch.py} & Mapping launch for \texttt{slam\_toolbox} plus optional autonomous mapping driver and track learner. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Configuration files: \texttt{config/}}
+\begin{longtable}{p{0.30\linewidth}p{0.66\linewidth}}
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endhead
+\texttt{sim.yaml} & Parameters for simulation bridge: map path, start poses, scan settings, topic names, teleop enable, and number of agents. \\
+\texttt{hardware.yaml} & Real-car parameters: actuation calibration, hardware ports, sensor topics, EKF, perception, and racing-controller settings (including delay and profiling). \\
+\texttt{slam\_mapping.yaml} & \texttt{slam\_toolbox} tuning for online mapping (frames, update intervals, loop closure, scan matching). \\
+\bottomrule
+\end{longtable}
+
+\subsection{Tools and offline scripts: \texttt{tools/}}
+\begin{longtable}{p{0.30\linewidth}p{0.66\linewidth}}
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endhead
+\texttt{annotate\_raceline.py} & Draws and labels raceline features (corners/apex/speed annotations) onto map imagery. \\
+\texttt{auto\_tune.py} & Automatic tuning loop for racing parameters using repeated benchmark/evaluation runs. \\
+\texttt{benchmark\_delay.py} & Measures effect of actuation delay and delay compensation strategies. \\
+\texttt{benchmark\_lap.py} & Runs lap-time benchmarking of current raceline/controller configuration in simulation. \\
+\texttt{benchmark\_lookahead.py} & Evaluates curvature-aware lookahead behavior in MAP controller. \\
+\texttt{benchmark\_map.py} & Benchmarks MAP steering LUT interpolation choices. \\
+\texttt{benchmark\_mpcc.py} & Compares MPCC and tracking MPC under matched conditions. \\
+\texttt{benchmark\_refiner.py} & Benchmarks raceline refinement pipeline and constraints. \\
+\texttt{benchmark\_spliner.py} & Benchmarks spliner-based overtaking strategy effects. \\
+\texttt{collect\_camera\_data.py} & Captures camera data for perception model training datasets. \\
+\texttt{draw\_raceline.py} & Visualizes raceline CSV over track/map image for inspection. \\
+\texttt{image\_to\_map.py} & Converts rendered track drawings into occupancy-map format for optimization/SLAM tooling. \\
+\texttt{refine\_comp\_raceline.py} & End-to-end competition raceline cleanup: refine, reprofile, validate, install. \\
+\texttt{reprofile\_raceline.py} & Recomputes only raceline speed column via friction-limited profiler. \\
+\texttt{train\_car\_detector.py} & Trains/exports YOLO opponent detector model for deployment (ONNX/TensorRT pipeline). \\
+\bottomrule
+\end{longtable}
+
+\subsection{Tests: \texttt{tests/} and \texttt{test/}}
+\begin{longtable}{p{0.30\linewidth}p{0.66\linewidth}}
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endhead
+\texttt{tests/closed\_loop.py} & Shared closed-loop simulation harness used by controller benchmark tests. \\
+\texttt{tests/test\_hardware.py} & Unit tests for hardware abstractions (PCA9685 math, VESC protocol, backend logic). \\
+\texttt{tests/test\_lookahead.py} & Tests for curvature-aware lookahead scheduling correctness and compatibility. \\
+\texttt{tests/test\_map\_controller.py} & Tests MAP controller LUT interpolation and steering behavior. \\
+\texttt{tests/test\_mpc.py} & Closed-loop MPC behavior and solve-budget validation tests. \\
+\texttt{tests/test\_mpcc.py} & MPCC closed-loop corridor and tracking tests. \\
+\texttt{tests/test\_race\_brain.py} & Tests opponent detection/fusion/strategy logic and race-mode transitions. \\
+\texttt{tests/test\_racing\_tech.py} & Consolidated tests for MAP and velocity-profile race-tech modules. \\
+\texttt{tests/test\_refiner.py} & Tests raceline-refinement optimizer logic. \\
+\texttt{tests/test\_spliner.py} & Tests Frenet spliner geometry and overtake-path generation. \\
+\texttt{tests/test\_state\_estimation.py} & Tests velocity EKF and lidar deskew behavior. \\
+\texttt{test/test\_flake8.py} & Lint style gate for Flake8 (ament tooling). \\
+\texttt{test/test\_pep257.py} & Docstring style gate for PEP257 (ament tooling). \\
+\texttt{test/test\_copyright.py} & License/copyright header gate (ament tooling). \\
+\bottomrule
+\end{longtable}
+
+\subsection{UI and packaging/support code}
+\begin{longtable}{p{0.30\linewidth}p{0.66\linewidth}}
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{File} & \textbf{Role and important details} \\
+\midrule
+\endhead
+\texttt{ui/server.py} & Lightweight dashboard backend; exposes REST endpoints, launches/stops race demos in the simulation container (Docker in this repository setup), and serves telemetry/raceline/image data. \\
+\texttt{ui/index.html} & Browser dashboard frontend for tuning, raceline generation, and race monitoring actions. \\
+\texttt{setup.py} & Python package setup and ROS 2 console entry points for executable nodes. \\
+\texttt{setup.cfg} & Packaging/lint configuration metadata for Python project tooling. \\
+\texttt{package.xml} & ROS package metadata and dependency declarations for build/runtime integration. \\
+\texttt{tools/finish\_mapping.sh} & Shell workflow helper to finalize a mapping session and persist map/raceline artifacts. \\
+\texttt{launch/ego\_racecar.xacro} & Robot description (URDF/Xacro) for ego vehicle visualization/transforms in sim. \\
+\texttt{launch/opp\_racecar.xacro} & Robot description (URDF/Xacro) for opponent vehicle visualization/transforms in sim. \\
+\bottomrule
+\end{longtable}
+
+\section{How major subsystems fit together}
+\subsection{Mapping and raceline generation phase}
+\begin{enumerate}
+  \item Run \texttt{slam\_mapping\_launch.py} to start SLAM.
+  \item Drive manually or with \texttt{mapping\_driver.py} to map the track.
+  \item \texttt{track\_learner.py} monitors map growth and repeatedly calls \texttt{raceline\_optimizer.py}.
+  \item Best feasible line is copied to \texttt{racelines/best\_raceline.csv}.
+\end{enumerate}
+
+\subsection{Race-time control phase}
+\begin{enumerate}
+  \item Load raceline CSV (x, y, heading, curvature, speed).
+  \item Optionally refine curvature and recompute speed profile.
+  \item Track line using MPC each tick.
+  \item If solver unavailable/fails, execute MAP fallback command.
+  \item Apply traction and emergency-braking safety overrides.
+  \item Send actuation through \texttt{drive\_node} backend.
+\end{enumerate}
+
+\subsection{Perception and opponents}
+\begin{itemize}
+  \item Lidar-only opponent extraction and tracking: \texttt{race\_brain.py}.
+  \item Camera-based YOLO opponent detections: \texttt{camera\_perception.py} (and optional OAK-D on-device detections in \texttt{oakd\_camera.py}).
+  \item Fusion and strategic behavior (attack/defend/evade): \texttt{race\_agent.py} + \texttt{race\_brain.py}.
+\end{itemize}
+
+\section{What is actually deployed on the vehicle for a robust race setup}
+For the cleanest competition stack in this repository, the deployed nodes are typically:
+\begin{itemize}
+  \item \texttt{rplidar\_node}
+  \item \texttt{oakd\_camera}
+  \item \texttt{velocity\_ekf}
+  \item localization node (external, typically particle filter)
+  \item \texttt{raceline\_mpc}
+  \item \texttt{drive\_node}
+\end{itemize}
+
+Among these, \texttt{raceline\_mpc.py} is the primary race logic loop and \texttt{drive\_node.py} is the hardware command execution/safety gate.
+
+\section{Practical reading order for newcomers}
+\begin{enumerate}
+  \item \texttt{README.md} for architecture and startup commands.
+  \item \texttt{launch/car\_bringup\_launch.py} and \texttt{config/hardware.yaml} to see real-car wiring.
+  \item \texttt{f1tenth\_gym\_ros/raceline\_mpc.py} and \texttt{f1tenth\_gym\_ros/mpc\_controller.py} for main control logic.
+  \item \texttt{f1tenth\_gym\_ros/drive\_node.py} for actuation/safety.
+  \item \texttt{f1tenth\_gym\_ros/raceline\_optimizer.py} for map-to-raceline generation.
+  \item \texttt{tests/} for behavior guarantees and expected invariants.
+\end{enumerate}
+
+\section{Final summary}
+AtlasAutoware is a complete autonomous racing stack where:
+\begin{itemize}
+  \item map creation and raceline optimization happen first,
+  \item race-time control is centered on \texttt{raceline\_mpc} at 50 Hz,
+  \item \texttt{drive\_node} safely turns commands into motor/steering actions,
+  \item and optional perception/strategy modules support multi-car racing.
+\end{itemize}
+
+This document is intended to give a full beginner-to-codebase bridge: terminology, architecture, runtime behavior, and per-file responsibilities.
+
+\end{document}
