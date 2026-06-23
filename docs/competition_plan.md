@@ -20,8 +20,13 @@ the car.
 - **Time-trial qualification:** `raceline_mpc` tracks a raceline generated for
   the AutoDRIVE track. Sim odom is ground truth → no particle filter needed.
 - **Unseen-track readiness** (qualification races a previously-unseen track):
-  make `map → raceline_optimizer → refiner → reprofile` a robust one-command
-  pipeline.
+  `tools/build_raceline.py <map.yaml>` is the one-command pipeline — auto-picks
+  a drivable seed (widest point on the track), runs the min-curvature
+  optimizer, and **validates in the closed-loop MPC benchmark** with a
+  feasibility gate (completes? lap time, XTE, planned a_lat vs grip budget,
+  wall clearance). It never green-lights a line that cuts walls or exceeds the
+  budget — on tight tracks it returns REVIEW (bump `--margin` / add a refine
+  pass). Needs properly-scaled RoboRacer track maps to produce a race line.
 - **Head-to-head:** `race_agent`/`spliner` overtaking.
 - Gate: completes laps in AutoDRIVE with bounded XTE before any speed push;
   cross-check in the deterministic f1tenth_gym benchmark.
