@@ -92,9 +92,17 @@ camera_perception:
   ros__parameters:
     image_topic: '/oakd/rgb'
     odom_topic: '/pf/pose/odom'
-    backend: 'auto'             # auto | tensorrt | cuda | cpu — auto prefers a
-                                # .engine built on the Jetson (trtexec --fp16),
-                                # then cv2.dnn CUDA, then CPU
+    backend: 'auto'             # auto | tensorrt | onnxruntime | cuda | cpu — auto prefers a
+                                # .engine built on the Jetson (trtexec --fp16), then
+                                # onnxruntime (CPU; what runs today), then cv2.dnn
+    img_size: 416               # models/car_yolov8.onnx is exported at 416 for the CPU path;
+                                # models/car_yolov8_640.onnx is the 640 export for TensorRT
+    fx: 460.5                   # Orbbec Gemini 335 color @640x480 (from /oakd/camera_info)
+    cx: 326.4
+    car_width: 0.30             # m, F1TENTH car incl. tires; sets range from box width
+    conf: 0.50                  # raised from 0.35: fewer close-range false positives
+    min_range: 0.8              # m; drop detections implying a car closer than this (lidar owns <0.8 m)
+    max_box_frac: 0.6           # drop boxes wider than 60% of the frame (hands, faces)
 
 raceline_mpc:
   ros__parameters:

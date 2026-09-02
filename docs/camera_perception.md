@@ -57,3 +57,37 @@ for *non-car* boundaries the lidar plane misses (curbs, painted lines) needs a
 drivable-area **segmentation** model + ground-plane homography — the same
 offline-train → ONNX → deploy workflow as the car detector, and a deliberate
 later add-on, not part of the map-building path.
+
+
+## Trained model on the car (2026-09-02)
+
+`models/car_yolov8.onnx` (416 px, for the Jetson CPU) and `models/car_yolov8_640.onnx` (for a
+future TensorRT engine) are a **YOLOv8n single-class "car" detector** fine-tuned from COCO weights.
+
+**Data** — four public Roboflow Universe sets (all CC BY 4.0), merged to one class with
+`tools/merge_car_datasets.py` (drops non-car classes, keeps each source's own train/val split):
+[F1 Tenth by F1Tenth Cars](https://universe.roboflow.com/f1tenth-cars/f1-tenth) (167),
+[F1Tenth Car Detection by CURC](https://universe.roboflow.com/curc-autonomous-vehicle-project/f1tenth-car-detection) (v6, 4 771 incl. augmentations),
+[f110 by pepperpeople](https://universe.roboflow.com/pepperpeople/f110) (483),
+[Detect F1Tenth by CU Robotics](https://universe.roboflow.com/cu-robotics-qtbgu/detect-f1tenth) (39)
+→ 4 907 train / 547 val, 5 389 boxes. Plus **185 hard negatives captured from this car's Orbbec**
+(hands, faces, hallway, bench — no cars; kept off GitHub because they contain people) so the model
+stops calling a hand at 0.3 m an opponent. Datasets are not committed (180 MB); download the zips
+(YOLOv8 format) and re-run the merge script to rebuild.
+
+**Training** — `tools/train_car_detector_gpu.py` (RTX 5070, 50 epochs, 17 min) then a 20-epoch
+fine-tune with the negatives. Held-out val (547 images): **mAP50 0.97, mAP50-95 0.75,
+precision 0.99, recall 0.97** before the negatives; see `finetune.log` metrics in the commit for after.
+
+**Runtime on the Jetson** — the Ubuntu OpenCV 4.5.4 cannot execute the YOLOv8 head, so
+`camera_perception` gained an **onnxruntime** backend (`pip3 install --user onnxruntime`; if pip
+drags in NumPy 2, `pip3 uninstall numpy` so the system 1.21 is used again or every cv2/cv_bridge
+node breaks). Measured through the deployed `OrtDetector`: 416 px → **58 ms/frame (17 fps)**,
+640 px → 124 ms (8 fps), 4 threads. Auto backend order: TensorRT → onnxruntime → cv2-CUDA → cv2-CPU.
+TensorRT would need the JetPack CUDA/TensorRT apt packages (not installed on this image).
+
+**Launch** — `ros2 launch f1tenth_gym_ros car_bringup_launch.py use_perception:=true` (off by
+default; only `race_agent` consumes `/camera_opponents_poses`). Params in `config/hardware.yaml`:
+Orbbec intrinsics fx 460.5 / cx 326.4 (640×480), `car_width 0.30`, `conf 0.5`, and two plausibility
+guards — `min_range 0.8` m and `max_box_frac 0.6` — because a box implying a car closer than that
+or filling the frame is a hand or a face, and inside 0.8 m the lidar owns the problem anyway.

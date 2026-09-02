@@ -52,3 +52,8 @@ Quick health check (second shell):
   Profile auto-selected (joy_teleop_f310.yaml). RB = autonomy deadman.
 - Speed cap in erpm mode: max_erpm 10000 = ~2.8 m/s with this gearing. Raise max_erpm in vesc.yaml
   for faster laps (20000 = ~5.6 m/s), rebuild, test on a stand first.
+
+## Camera perception (2026-09-02)
+- YOLOv8n car detector: models/car_yolov8.onnx (416, CPU/onnxruntime 17 fps) + _640 for TensorRT later.
+- Enable with use_perception:=true; feeds /camera_opponents_poses to race_agent only.
+- pip3 --user onnxruntime on the Jetson; if it installs NumPy 2, pip3 uninstall numpy (system 1.21 must win).

@@ -49,7 +49,8 @@ def generate_launch_description():
                          ('use_drive', 'true'), ('use_racing', 'true'),
                          ('use_teleop', 'false'),
                          ('camera_backend', 'orbbec'),   # orbbec | oakd
-                         ('use_depth', 'false')):        # orbbec depth + pointcloud
+                         ('use_depth', 'false'),         # orbbec depth + pointcloud
+                         ('use_perception', 'false')):   # YOLO car detector -> /camera_opponents_poses
         ld.add_action(DeclareLaunchArgument(arg, default_value=default))
 
     ld.add_action(Node(
@@ -105,6 +106,18 @@ def generate_launch_description():
         condition=_both('use_camera', 'oakd'),
     ))
 
+    # ── camera_perception: YOLOv8 car detector on /oakd/rgb -> /camera_opponents_poses ──
+    # (consumed by race_agent for head-to-head; raceline_mpc ignores it). Off by default:
+    # onnxruntime on the CPU costs ~60 ms/frame at 416 px. use_perception:=true to enable.
+    ld.add_action(Node(
+        package='f1tenth_gym_ros',
+        executable='camera_perception',
+        name='camera_perception',
+        parameters=[config],
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('use_camera'), "' == 'true' and '",
+            LaunchConfiguration('use_perception'), "' == 'true'"])),
+    ))
     ld.add_action(Node(
         package='f1tenth_gym_ros',
         executable='drive_node',

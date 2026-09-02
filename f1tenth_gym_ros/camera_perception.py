@@ -99,6 +99,36 @@ class CarDetector:
                                  self.car_class)
 
 
+class OrtDetector:
+    """YOLOv8 ONNX via onnxruntime (CPU). The Jetson's Ubuntu OpenCV 4.5.4 cannot run
+    the YOLOv8 head (DFL reshape), so this is the working non-TensorRT path there:
+    yolov8n ~130 ms/frame at 640, ~60 ms at 416 on the Orin Nano CPU (4 threads).
+    Same detect() interface and output parsing as CarDetector."""
+
+    backend = 'onnxruntime'
+
+    def __init__(self, model_path, img_size=640, conf=0.35, nms=0.45, car_class=0, threads=4):
+        import onnxruntime as ort
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f'model not found: {model_path}')
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = int(threads)
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.sess = ort.InferenceSession(model_path, so, providers=['CPUExecutionProvider'])
+        self.inp = self.sess.get_inputs()[0].name
+        shp = self.sess.get_inputs()[0].shape           # e.g. [1, 3, 416, 416]
+        if isinstance(shp[-1], int) and shp[-1] != img_size:
+            img_size = shp[-1]                         # model is fixed-size: follow it
+        self.sz, self.conf, self.nms, self.car_class = img_size, conf, nms, car_class
+
+    def detect(self, img):
+        h0, w0 = img.shape[:2]
+        x = cv2.resize(img, (self.sz, self.sz))[:, :, ::-1]           # BGR -> RGB
+        x = np.ascontiguousarray(x.transpose(2, 0, 1)[None], dtype=np.float32) / 255.0
+        out = self.sess.run(None, {self.inp: x})[0]                     # (1, 4+nc, N)
+        return parse_yolo_output(out, w0, h0, self.sz, self.conf, self.nms, self.car_class)
+
+
 class TRTDetector:
     """YOLOv8 TensorRT engine on the Jetson GPU (FP16).
 
@@ -151,8 +181,9 @@ class TRTDetector:
 
 
 def make_detector(model_path, backend='auto', **kw):
-    """backend: auto | tensorrt | cuda | cpu.  `auto` prefers a TensorRT
-    .engine next to (or instead of) the ONNX, then cv2-CUDA, then CPU."""
+    """backend: auto | tensorrt | onnxruntime | cuda | cpu.  `auto` prefers a TensorRT
+    .engine next to (or instead of) the ONNX, then onnxruntime (CPU), then cv2-CUDA,
+    then cv2-CPU (which cannot run YOLOv8 on OpenCV < 4.7)."""
     engine = model_path if model_path.endswith(('.engine', '.trt')) \
         else os.path.splitext(model_path)[0] + '.engine'
     if backend in ('auto', 'tensorrt') and os.path.exists(engine):
@@ -163,6 +194,13 @@ def make_detector(model_path, backend='auto', **kw):
                 raise
     if backend == 'tensorrt':
         raise FileNotFoundError(f'no TensorRT engine at {engine}')
+    if backend in ('auto', 'onnxruntime'):
+        try:
+            return OrtDetector(model_path, **kw)
+        except Exception as e:
+            if backend == 'onnxruntime':
+                raise
+            print(f'[camera_perception] onnxruntime unavailable ({e}); trying cv2.dnn')
     has_cuda = (cv2 is not None
                 and cv2.cuda.getCudaEnabledDeviceCount() > 0) \
         if backend == 'auto' else (backend == 'cuda')
@@ -222,17 +260,26 @@ def _make_node():
             self.declare_parameter('cx', 320.0)
             self.declare_parameter('car_width', 0.30)
             self.declare_parameter('conf', 0.35)
+            # plausibility guards: a real opponent is never closer than min_range (the
+            # lidar owns that zone anyway) and never fills most of the frame. A hand or
+            # face passing the lens otherwise becomes an 'opponent at 0.2 m'.
+            self.declare_parameter('min_range', 0.5)      # m
+            self.declare_parameter('max_box_frac', 0.6)   # box width / image width
             self.declare_parameter('odom_topic', '/ego_racecar/odom')
-            self.declare_parameter('backend', 'auto')  # auto|tensorrt|cuda|cpu
+            self.declare_parameter('backend', 'auto')  # auto|tensorrt|onnxruntime|cuda|cpu
+            self.declare_parameter('img_size', 640)    # model input side (416 = faster on CPU)
             topic = self.get_parameter('image_topic').value
             self.fx = float(self.get_parameter('fx').value)
             self.cx = float(self.get_parameter('cx').value)
             self.car_w = float(self.get_parameter('car_width').value)
+            self.min_range = float(self.get_parameter('min_range').value)
+            self.max_box_frac = float(self.get_parameter('max_box_frac').value)
 
             try:
                 self.detector = make_detector(
                     self.get_parameter('model_path').value,
                     backend=self.get_parameter('backend').value,
+                    img_size=int(self.get_parameter('img_size').value),
                     conf=float(self.get_parameter('conf').value))
                 self.get_logger().info(
                     f'YOLO car detector loaded (backend: {self.detector.backend})')
@@ -266,8 +313,13 @@ def _make_node():
             if img is None:
                 return
             opps = []
+            img_w = img.shape[1]
             for box in self.detector.detect(img):
+                if box[2] > self.max_box_frac * img_w:
+                    continue                                   # fills the frame: not a car at range
                 xf, yl, rng = box_to_relative(box, self.fx, self.cx, self.car_w)
+                if rng < self.min_range:
+                    continue
                 wx, wy = relative_to_world(xf, yl, self.ego)
                 o = Opponent(wx, wy, rng, self.car_w, math.atan2(yl, xf))
                 opps.append(o)
