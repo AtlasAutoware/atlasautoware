@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="640" viewBox="0 0 1000 640" font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#333" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect width="1000" height="640" fill="#fff"/>
+<style>
+.t{font-size:15px;font-weight:700;fill:#111}.s{font-size:12px;fill:#333}.k{font-size:11.5px;fill:#555;font-family:Menlo,Consolas,monospace}
+.sen{fill:#EAF1FB;stroke:#3B6FB6}.sw{fill:#EBF6EE;stroke:#3F8F4E}.act{fill:#FFF3E0;stroke:#C77D1F}.inf{fill:#F3F3F3;stroke:#777}
+.ln{fill:none;stroke:#333;stroke-width:1.4}
+</style>
+
+<!-- sensors -->
+<g><rect class="sen" x="30" y="24" width="290" height="70" rx="8" stroke-width="1.2"/>
+<text class="t" x="175" y="48" text-anchor="middle">Slamtec RPLIDAR C1</text>
+<text class="s" x="175" y="66" text-anchor="middle">2-D laser · 360° · 10 Hz · 16 m · serial 460 800 baud</text>
+<text class="k" x="175" y="84" text-anchor="middle">/scan</text></g>
+<g><rect class="sen" x="355" y="24" width="290" height="70" rx="8" stroke-width="1.2"/>
+<text class="t" x="500" y="48" text-anchor="middle">Orbbec Gemini 335</text>
+<text class="s" x="500" y="66" text-anchor="middle">RGB 640×480 @ 30 Hz · accel + gyro 200 Hz · USB</text>
+<text class="k" x="500" y="84" text-anchor="middle">/oakd/rgb  /oakd/camera_info  /oakd/imu</text></g>
+<g><rect class="inf" x="680" y="24" width="290" height="70" rx="8" stroke-width="1.2"/>
+<text class="t" x="825" y="48" text-anchor="middle">Logitech F310 gamepad</text>
+<text class="s" x="825" y="66" text-anchor="middle">deadman LB · throttle / steer sticks · USB</text>
+<text class="k" x="825" y="84" text-anchor="middle">/joy</text></g>
+<path class="ln" d="M175 94 V128" marker-end="url(#a)"/><path class="ln" d="M500 94 V128" marker-end="url(#a)"/><path class="ln" d="M825 94 V128" marker-end="url(#a)"/>
+
+<!-- Jetson -->
+<rect x="30" y="128" width="940" height="262" rx="14" fill="none" stroke="#444" stroke-width="1.2" stroke-dasharray="6 4"/>
+<text class="t" x="46" y="152">NVIDIA Jetson Orin Nano · JetPack 6 · Ubuntu 22.04 · ROS 2 Humble</text>
+<g><rect class="sw" x="46" y="166" width="440" height="208" rx="8" stroke-width="1.2"/>
+<text class="t" x="60" y="190">Manual stack (f1tenth_ws, upstream F1TENTH + patches)</text>
+<text class="s" x="60" y="212">joy → joy_teleop (F310 profile) → ackermann_mux</text>
+<text class="s" x="60" y="230">→ ackermann_to_vesc: erpm / current / speed modes</text>
+<text class="s" x="60" y="248">→ vesc_driver (USB) · vesc_to_odom → /odom 50 Hz</text>
+<text class="s" x="60" y="266">rplidar_ros (C1 launch) · static TF base_link→laser</text>
+<text class="s" x="60" y="292">Purpose: driving by hand, motor and steering</text>
+<text class="s" x="60" y="310">tuning, VESC bring-up, data collection.</text>
+<text class="k" x="60" y="338">ros2 launch f1tenth_stack bringup_launch.py</text>
+<text class="s" x="60" y="360">One command brings up all eight nodes.</text></g>
+<g><rect class="sw" x="514" y="166" width="440" height="208" rx="8" stroke-width="1.2"/>
+<text class="t" x="528" y="190">Autonomy stack (atlas_ws, AtlasAutoware repo)</text>
+<text class="s" x="528" y="212">rplidar_node (de-skewed 720-bin scan)</text>
+<text class="s" x="528" y="230">orbbec_camera → imu_optical_to_body → /oakd/imu</text>
+<text class="s" x="528" y="248">velocity_ekf: IMU + wheel odom → /ekf/odom 200 Hz</text>
+<text class="s" x="528" y="266">raceline_mpc: LTV-MPC, MAP fallback, AEB, traction</text>
+<text class="s" x="528" y="284">governor, latency compensation → /drive</text>
+<text class="s" x="528" y="302">camera_perception: YOLOv8n car detector (onnxruntime,</text>
+<text class="s" x="528" y="320">17 fps) → /camera_opponents_poses → race_agent</text>
+<text class="s" x="528" y="338">drive_node: direct VESC serial, current mode, telemetry</text>
+<text class="k" x="528" y="362">./run_selfdrive.sh   (stops the manual stack first)</text></g>
+
+<!-- down links -->
+<path class="ln" d="M266 374 V410 H430" fill="none"/><path class="ln" d="M734 374 V410 H570" fill="none"/>
+<path class="ln" d="M500 410 V430" marker-end="url(#a)"/>
+<text class="s" x="500" y="404" text-anchor="middle">USB CDC, one stack at a time</text>
+
+<!-- VESC -->
+<g><rect class="act" x="300" y="430" width="400" height="76" rx="8" stroke-width="1.2"/>
+<text class="t" x="500" y="454" text-anchor="middle">Flipsky FSESC 6.7 Pro (VESC firmware 6.06, HW 60)</text>
+<text class="s" x="500" y="472" text-anchor="middle">FOC with hall sensors · App = UART · Servo Output on</text>
+<text class="s" x="500" y="490" text-anchor="middle">motor 60 A / abs 120 A / Slow ABS · telemetry 50 Hz</text></g>
+
+<!-- laptop / github -->
+<g><rect class="inf" x="22" y="430" width="246" height="76" rx="8" stroke-width="1.2"/>
+<text class="t" x="145" y="454" text-anchor="middle">Development laptop</text>
+<text class="s" x="145" y="472" text-anchor="middle">USB-C gadget network to the Jetson</text>
+<text class="s" x="145" y="490" text-anchor="middle">VESC Tool 6.06 · YOLO training, RTX 5070</text></g>
+<g><rect class="inf" x="732" y="430" width="246" height="76" rx="8" stroke-width="1.2"/>
+<text class="t" x="855" y="454" text-anchor="middle">GitHub: AtlasAutoware</text>
+<text class="s" x="855" y="472" text-anchor="middle">ROS package + hardware/ folder:</text>
+<text class="s" x="855" y="490" text-anchor="middle">configs · udev rules · VESC blobs · runbook</text></g>
+<path class="ln" d="M145 430 V390" marker-end="url(#a)"/><path class="ln" d="M855 430 V390" marker-end="url(#a)"/>
+
+<!-- actuation -->
+<path class="ln" d="M380 506 V530 H175 V548" marker-end="url(#a)"/>
+<path class="ln" d="M500 506 V548" marker-end="url(#a)"/>
+<path class="ln" d="M825 548 V526 H720 V468 H700" marker-end="url(#a)"/>
+<g><rect class="act" x="30" y="548" width="290" height="66" rx="8" stroke-width="1.2"/>
+<text class="t" x="175" y="572" text-anchor="middle">Castle Creations 1415, 2400 Kv</text>
+<text class="s" x="175" y="590" text-anchor="middle">sensored 4-pole brushless · Slash gearbox, FDR 10.2</text>
+<text class="s" x="175" y="606" text-anchor="middle">3 phase leads + 6-pin hall/thermistor harness</text></g>
+<g><rect class="act" x="355" y="548" width="290" height="66" rx="8" stroke-width="1.2"/>
+<text class="t" x="500" y="572" text-anchor="middle">Hitec D625MW steering servo</text>
+<text class="s" x="500" y="590" text-anchor="middle">driven from the VESC's PPM/servo header</text>
+<text class="s" x="500" y="606" text-anchor="middle">same pin as the RC input (Servo Output on)</text></g>
+<g><rect class="act" x="680" y="548" width="290" height="66" rx="8" stroke-width="1.2"/>
+<text class="t" x="825" y="572" text-anchor="middle">4S LiPo 9000 mAh, XT90</text>
+<text class="s" x="825" y="590" text-anchor="middle">16.4 V to the VESC; 5 V BEC feeds the servo</text>
+<text class="s" x="825" y="606" text-anchor="middle">no reverse-polarity protection</text></g>
+</svg>
