@@ -11,8 +11,9 @@ seconds (0.25) a neutral Joy is published and the car stops. /joy feeds the unch
 F1TENTH chain: joy_teleop (F310 profile: button 4 = dead-man, axis 1 throttle, axis 3
 steer) -> ackermann_mux -> ackermann_to_vesc -> vesc_driver.
 """
-import json, socket, threading, time
+import json, os, socket, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 import numpy as np, cv2
 import rclpy
 from rclpy.node import Node
@@ -20,7 +21,21 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, Joy, LaserScan
 
 N_AXES, N_BUTTONS = 6, 11
-S = {'jpg': None, 'jpg_t': 0.0, 'cmd': None, 'cmd_t': 0.0, 'src': '-', 'v': None, 'rx': 0, 'scan': None, 'lock': threading.Lock()}
+TRIM_FILE = os.path.expanduser('~/.atlascar_trim.json')   # steering trim survives restarts
+S = {'jpg': None, 'jpg_t': 0.0, 'cmd': None, 'cmd_t': 0.0, 'src': '-', 'v': None, 'rx': 0, 'scan': None,
+     'trim': 0.0, 'video': {'width': 480, 'quality': 60, 'fps': 15.0}, 'lock': threading.Lock()}
+
+
+def load_trim():
+    try:
+        with open(TRIM_FILE) as f: return float(json.load(f).get('steer_trim', 0.0))
+    except (OSError, ValueError): return 0.0
+
+
+def save_trim(t):
+    try:
+        with open(TRIM_FILE, 'w') as f: json.dump({'steer_trim': t}, f)
+    except OSError: pass
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>AtlasCar pilot</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -44,11 +59,13 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>AtlasCar pilo
  <span>thr <span class="bar"><i id="tb"></i></span> <span id="tv">0.00</span></span>
  <span>steer <span class="bar"><i id="sb"></i></span> <span id="sv">0.00</span></span>
  <span>max <input id="max" type="range" min="0.1" max="1" step="0.05" value="0.4"> <span id="mv">40%</span></span>
+ <span>trim <button id="tl">&lsaquo;</button> <span id="trim">0.00</span> <button id="tr">&rsaquo;</button></span>
+ <span>video <select id="vq"><option value="normal">normal</option><option value="low">low (cellular)</option></select></span>
  <span id="pad">no gamepad</span>
  <span id="link">link: -</span>
  <span id="batt">batt: -</span>
 </div>
-<div id="help">W/S throttle &nbsp; A/D steer &nbsp; (keys held = armed; release = stop) &nbsp;|&nbsp; gamepad: hold LB, left stick throttle, right stick steer</div>
+<div id="help">W/S throttle &nbsp; A/D steer &nbsp; Q/E trim (car pulls right &rarr; press Q) &nbsp; (keys held = armed; release = stop) &nbsp;|&nbsp; gamepad: hold LB, left stick throttle, right stick steer</div>
 <script>
 const keys={}; let thr=0, str=0, lastSend=0, lastArmed=-1e9, rtt='-', padName=null;
 const $=id=>document.getElementById(id);
@@ -56,6 +73,18 @@ addEventListener('keydown',e=>{if(['w','a','s','d','W','A','S','D'].includes(e.k
 addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=0;});
 addEventListener('blur',()=>{for(const k in keys)keys[k]=0;});
 $('max').oninput=()=>{$('mv').textContent=Math.round($('max').value*100)+'%';};
+// ── steering trim: stored on the car, applied to every source (keys, pad, UDP) ──
+let trim=0;
+function showTrim(t){trim=t;$('trim').textContent=(t>=0?'+':'')+t.toFixed(2);
+  $('trim').title='equivalent vesc.yaml steering_angle_to_servo_offset change: '+(-0.4126*t).toFixed(4);}
+function setTrim(t){t=Math.max(-0.3,Math.min(0.3,t));
+  fetch('/trim',{method:'POST',body:JSON.stringify({steer_trim:t})}).then(r=>r.json()).then(s=>showTrim(s.steer_trim)).catch(()=>{});}
+$('tl').onclick=()=>setTrim(trim+0.01); $('tr').onclick=()=>setTrim(trim-0.01);   // ROS: left = +
+addEventListener('keydown',e=>{if(e.key==='q'||e.key==='Q')setTrim(trim+0.01); if(e.key==='e'||e.key==='E')setTrim(trim-0.01);});
+fetch('/trim').then(r=>r.json()).then(s=>showTrim(s.steer_trim)).catch(()=>{});
+// ── video quality: normal (480 px, q60, 15 fps) or low for cellular (320 px, q45, 10 fps) ──
+$('vq').onchange=()=>{const low=$('vq').value==='low';
+  fetch('/video?w='+(low?320:480)+'&q='+(low?45:60)+'&fps='+(low?10:15),{method:'POST'}).catch(()=>{});};
 function step(target,cur,rate){return cur+Math.max(-rate,Math.min(rate,target-cur));}
 function tick(){
   const dt=0.02, max=parseFloat($('max').value);
@@ -128,6 +157,9 @@ class H(BaseHTTPRequestHandler):
         if self.path == '/scan':
             with S['lock']: sc = S['scan']
             self._json(sc if sc else {}); return
+        if self.path == '/trim':
+            with S['lock']: t = S['trim']
+            self._json({'steer_trim': t}); return
         if self.path != '/stream':
             self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers(); return
         self.send_response(200); self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
@@ -141,11 +173,23 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + str(len(jpg)).encode() + b'\r\n\r\n' + jpg + b'\r\n')
         except (BrokenPipeError, ConnectionResetError): pass
     def do_POST(self):
-        if self.path != '/cmd':
-            self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers(); return
-        n = int(self.headers.get('Content-Length', 0)); body = self.rfile.read(n)
-        if accept(body, 'web:' + self.client_address[0]): self._json(status())
-        else: self._json({'error': 'bad command'}, 400)
+        u = urlparse(self.path); n = int(self.headers.get('Content-Length', 0)); body = self.rfile.read(n)
+        if u.path == '/cmd':
+            if accept(body, 'web:' + self.client_address[0]): self._json(status())
+            else: self._json({'error': 'bad command'}, 400)
+            return
+        if u.path == '/trim':
+            try: t = max(-0.3, min(0.3, float(json.loads(body.decode())['steer_trim'])))
+            except (ValueError, KeyError, TypeError): self._json({'error': 'bad trim'}, 400); return
+            with S['lock']: S['trim'] = t
+            save_trim(t); self._json({'steer_trim': t}); return
+        if u.path == '/video':
+            q = parse_qs(u.query)
+            with S['lock']:
+                v = S['video']
+                v['width'] = int(q.get('w', [v['width']])[0]); v['quality'] = int(q.get('q', [v['quality']])[0]); v['fps'] = float(q.get('fps', [v['fps']])[0])
+                self._json(dict(v)); return
+        self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers()
 
 
 def accept(raw, src):
@@ -170,8 +214,12 @@ class WebPilot(Node):
                      ('image_topic', '/camera/color/image_raw'), ('width', 480), ('quality', 60), ('fps', 15.0), ('udp_invert_axes', True)):
             self.declare_parameter(k, v)
         p = lambda n: self.get_parameter(n).value
-        self.timeout, self.width, self.q, self.min_dt = float(p('timeout')), int(p('width')), int(p('quality')), 1.0 / float(p('fps'))
+        self.timeout = float(p('timeout'))
+        with S['lock']:
+            S['video'] = {'width': int(p('width')), 'quality': int(p('quality')), 'fps': float(p('fps'))}
+            S['trim'] = load_trim()
         self.udp_invert = bool(p('udp_invert_axes')); self.last_jpg = 0.0; self.link_up = False
+        if S['trim']: self.get_logger().info(f"steering trim restored: {S['trim']:+.2f} ({TRIM_FILE})")
         self.pub = self.create_publisher(Joy, p('joy_topic'), 10)
         self.create_subscription(Image, p('image_topic'), self._img, qos_profile_sensor_data)
         self.declare_parameter('scan_topic', '/scan'); self.last_scan = 0.0
@@ -189,12 +237,14 @@ class WebPilot(Node):
 
     def _img(self, m):
         now = time.time()
-        if now - self.last_jpg < self.min_dt or m.encoding not in ('rgb8', 'bgr8'): return
+        with S['lock']: v = dict(S['video'])
+        if now - self.last_jpg < 1.0 / max(1.0, v['fps']) or m.encoding not in ('rgb8', 'bgr8'): return
         self.last_jpg = now
         a = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, 3)
         if m.encoding == 'rgb8': a = a[:, :, ::-1]
-        if m.width != self.width: a = cv2.resize(a, (self.width, int(m.height * self.width / m.width)), interpolation=cv2.INTER_AREA)
-        ok, jpg = cv2.imencode('.jpg', a, [cv2.IMWRITE_JPEG_QUALITY, self.q])
+        w = int(v['width'])
+        if m.width != w: a = cv2.resize(a, (w, int(m.height * w / m.width)), interpolation=cv2.INTER_AREA)
+        ok, jpg = cv2.imencode('.jpg', a, [cv2.IMWRITE_JPEG_QUALITY, int(v['quality'])])
         if ok:
             with S['lock']: S['jpg'], S['jpg_t'] = jpg.tobytes(), now
 
@@ -219,9 +269,11 @@ class WebPilot(Node):
     def _tick(self):
         self._drain_udp()
         msg = Joy(); msg.header.stamp = self.get_clock().now().to_msg(); msg.header.frame_id = 'web_pilot'
-        with S['lock']: cmd, age, src = S['cmd'], time.time() - S['cmd_t'], S['src']
+        with S['lock']: cmd, age, src, trim = S['cmd'], time.time() - S['cmd_t'], S['src'], S['trim']
         if cmd is not None and age <= self.timeout:
-            msg.axes, msg.buttons = cmd
+            axes = list(cmd[0])
+            axes[3] = max(-1.0, min(1.0, axes[3] + trim))        # steering trim (ROS: + = left)
+            msg.axes, msg.buttons = axes, cmd[1]
             if not self.link_up: self.link_up = True; self.get_logger().info(f'commands from {src}')
         else:
             msg.axes, msg.buttons = [0.0] * N_AXES, [0] * N_BUTTONS

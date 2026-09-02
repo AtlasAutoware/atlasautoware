@@ -105,7 +105,8 @@ def generate_launch_description():
         package='joy',
         executable='joy_node',
         name='joy',
-        parameters=[LaunchConfiguration('joy_config')]
+        parameters=[LaunchConfiguration('joy_config')],
+        respawn=True, respawn_delay=2.0,
     )
     joy_teleop_node = Node(
         package='joy_teleop',
@@ -117,7 +118,8 @@ def generate_launch_description():
         package='vesc_ackermann',
         executable='ackermann_to_vesc_node',
         name='ackermann_to_vesc_node',
-        parameters=[LaunchConfiguration('vesc_config')]
+        parameters=[LaunchConfiguration('vesc_config')],
+        respawn=True, respawn_delay=2.0,
     )
     vesc_to_odom_node = Node(
         package='vesc_ackermann',
@@ -129,7 +131,8 @@ def generate_launch_description():
         package='vesc_driver',
         executable='vesc_driver_node',
         name='vesc_driver_node',
-        parameters=[LaunchConfiguration('vesc_config')]
+        parameters=[LaunchConfiguration('vesc_config')],
+        respawn=True, respawn_delay=2.0,
     )
     throttle_interpolator_node = Node(
         package='f1tenth_stack',

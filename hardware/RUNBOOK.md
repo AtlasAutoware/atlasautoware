@@ -66,3 +66,9 @@ Quick health check (second shell):
   gamepad via the browser (hold LB), lidar plot. Release everything = neutral; 250 ms watchdog on the car.
 - Only the tab that is driving sends commands; other tabs are viewers. Python client: tools/remote_pilot.py (UDP 5005).
 - Never pkill by a pattern that appears in your own command line (it kills the shell); use the scripts.
+
+## Range, trim, robustness (2026-09-02, later)
+- Steering trim: Q/E on the web page (stored on the car in ~/.atlascar_trim.json); for autonomy apply the equivalent to vesc.yaml steering_angle_to_servo_offset (see docs/REMOTE.md).
+- Networks: hardware/scripts/carnet.sh  hotspot | hotspot24 | client <SSID> [pw] | tether | status.
+- Anywhere/cellular: install_tailscale.sh once, then http://atlascar:8080/ with video=low and PILOT_TIMEOUT=0.6 run_remote.sh lowbw.
+- vesc_driver/ackermann_to_vesc/joy respawn after a VESC USB blip (they used to die with std::system_error).

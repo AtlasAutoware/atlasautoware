@@ -9,6 +9,8 @@
 #      autoconnect). Join it from the laptop/phone.
 #   2. On the car:   ./run_remote.sh            (drive + FPV)
 #                    ./run_remote.sh novideo    (drive only)
+#                    PILOT_TIMEOUT=0.6 ./run_remote.sh lowbw   (cellular / Tailscale: small video, 600 ms watchdog)
+#      Other networks (mesh client, 2.4 GHz hotspot, phone tether): hardware/scripts/carnet.sh
 #   3. Open  http://10.42.0.1:8080/   — W/S throttle, A/D steer, or hold LB on a pad
 #      plugged into the laptop (browser Gamepad API). Release everything = car stops.
 #   Over the USB-C link the same page is at http://192.168.55.1:8080/ .
@@ -36,7 +38,9 @@ if [ "${1:-}" != "novideo" ]; then
         enable_accel:=false enable_gyro:=false log_level:=warn > /tmp/remote_camera.log 2>&1 &
     sleep 6
 fi
-ros2 run f1tenth_gym_ros web_pilot &
+# lowbw: cellular / Tailscale — smaller video and a longer command watchdog (PILOT_TIMEOUT, s)
+if [ "${1:-}" = "lowbw" ]; then VID="-p width:=320 -p quality:=45 -p fps:=10.0"; else VID=""; fi
+ros2 run f1tenth_gym_ros web_pilot --ros-args -p timeout:=${PILOT_TIMEOUT:-0.25} $VID &
 
 echo "──────────────────────────────────────────────────────────────"
 echo " REMOTE PILOT MODE ready.  Car IPs: $(hostname -I)"
