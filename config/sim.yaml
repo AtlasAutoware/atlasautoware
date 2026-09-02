@@ -42,7 +42,7 @@ bridge:
     scan_beams: 1080
 
     # map parameters
-    map_path: '/sim_ws/src/f1tenth_gym_ros/maps/Spielberg_map'
+    map_path: "/home/atlas/atlas_ws/src/atlasautoware/maps/my_track"
     map_img_ext: '.png'
 
     # opponent parameters

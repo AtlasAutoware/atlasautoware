@@ -29,6 +29,7 @@ Run:
     ros2 run f1tenth_gym_ros drive_node --ros-args --params-file config/hardware.yaml
 """
 
+import math
 import os
 import sys
 import time
@@ -80,7 +81,8 @@ class PCA9685Backend:
 
 
 class VescSerialBackend:
-    """Direct UART: closed-loop SET_RPM + the VESC's own servo header."""
+    """Direct UART: SET_RPM (closed-loop speed) or SET_CURRENT (direct torque),
+    selected by `control_mode`, plus the VESC's own servo header."""
 
     name = 'vesc'
     has_telemetry = True
@@ -89,10 +91,34 @@ class VescSerialBackend:
         self.ser = ser
         self.cfg = cfg
         self.erpm_gain = float(cfg['erpm_gain'])
+        # current-control (torque) parameters — mirror f1tenth_stack vesc.yaml so the
+        # self-driving path launches the same way the manual joystick path does.
+        self.control_mode = str(cfg.get('control_mode', 'speed')).lower()
+        self.max_speed = float(cfg['max_speed'])
+        self.max_current = float(cfg['max_current'])
+        self.min_current = float(cfg['min_current'])
+        self.brake_current = float(cfg['brake_current'])
+        self.current_deadband = float(cfg['current_deadband'])
         self.parser = vp.PacketParser()
 
+    def _write_throttle(self, speed):
+        if self.control_mode == 'current':
+            # Map the commanded speed (planner/MPC output, m/s) to motor current so the car
+            # pulls off the line immediately instead of waiting for the VESC's internal RPM
+            # loop to wind current up past stiction (the ~30-35 A dead zone). A min_current
+            # feed-forward guarantees torque the instant a non-zero speed is requested.
+            throttle = speed / self.max_speed if self.max_speed > 0.0 else 0.0
+            throttle = max(-1.0, min(1.0, throttle))
+            if abs(throttle) < self.current_deadband:
+                self.ser.write(vp.pkt_set_current_brake(self.brake_current))
+            else:
+                mag = self.min_current + abs(throttle) * (self.max_current - self.min_current)
+                self.ser.write(vp.pkt_set_current(math.copysign(mag, throttle)))
+        else:
+            self.ser.write(vp.pkt_set_rpm(speed * self.erpm_gain))
+
     def command(self, speed, steer):
-        self.ser.write(vp.pkt_set_rpm(speed * self.erpm_gain))
+        self._write_throttle(speed)
         c = self.cfg
         frac = max(-1.0, min(1.0, float(steer) / float(c['max_steer'])))
         if c['steer_invert']:
@@ -211,6 +237,12 @@ def _make_node():
             self.declare_parameter('serial_port', '/dev/ttyACM0')
             self.declare_parameter('serial_baud', 115200)
             self.declare_parameter('erpm_gain', 4614.0)  # erpm per m/s
+            # vesc-uart motor command mode (mirrors f1tenth_stack/config/vesc.yaml)
+            self.declare_parameter('control_mode', 'speed')   # 'speed' (SET_RPM) | 'current'
+            self.declare_parameter('max_current', 45.0)       # A at full-speed command
+            self.declare_parameter('min_current', 10.0)       # A feed-forward to break stiction
+            self.declare_parameter('brake_current', 15.0)     # A brake when ~zero speed requested
+            self.declare_parameter('current_deadband', 0.05)  # |throttle| fraction treated as stop
             self.declare_parameter('odom_topic', '/vesc/odom')
             self.declare_parameter('odom_frame', 'odom')
             self.declare_parameter('base_frame', 'base_link')
@@ -221,7 +253,9 @@ def _make_node():
                 'i2c_bus', 'i2c_address', 'pwm_hz', 'throttle_channel',
                 'steer_channel', 'neutral_us', 'full_fwd_us', 'full_rev_us',
                 'steer_center_us', 'steer_half_range_us',
-                'serial_port', 'serial_baud', 'erpm_gain')}
+                'serial_port', 'serial_baud', 'erpm_gain',
+                'control_mode', 'max_current', 'min_current',
+                'brake_current', 'current_deadband')}
             prefer = self.get_parameter('backend').value
             self.backend = pick_backend(
                 prefer, cfg, lambda m: self.get_logger().info(m))

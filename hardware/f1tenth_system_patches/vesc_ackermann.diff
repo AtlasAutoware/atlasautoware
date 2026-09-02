@@ -1,0 +1,169 @@
+diff --git a/vesc_ackermann/include/vesc_ackermann/ackermann_to_vesc.hpp b/vesc_ackermann/include/vesc_ackermann/ackermann_to_vesc.hpp
+index b646c36..902738f 100644
+--- a/vesc_ackermann/include/vesc_ackermann/ackermann_to_vesc.hpp
++++ b/vesc_ackermann/include/vesc_ackermann/ackermann_to_vesc.hpp
+@@ -52,10 +52,26 @@ private:
+   double speed_to_erpm_gain_, speed_to_erpm_offset_;
+   double steering_to_servo_gain_, steering_to_servo_offset_;
+ 
++  // motor command mode: "speed" (closed-loop eRPM, legacy) or "current" (direct torque)
++  std::string control_mode_;
++  // current-mode parameters
++  double max_speed_;          // m/s at full stick, used to normalize throttle
++  double max_current_;        // amps commanded at full stick
++  double min_current_;        // amps feed-forward to break drivetrain stiction
++  double brake_current_;      // brake amps applied when stick is released
++  double current_deadband_;   // |throttle| fraction below which the stick counts as released
++  // "erpm" mode: closed-loop speed with a floor so the wheels always spin fast enough
++  // to carry over obstacles (and never sit in the low-speed stall/stiction zone)
++  double min_erpm_;           // eRPM at the first bit of throttle
++  double max_erpm_;           // eRPM at full throttle
++  double erpm_deadband_;      // |throttle| fraction below which eRPM = 0 (coast)
++
+   /** @todo consider also providing an interpolated look-up table conversion */
+ 
+   // ROS services
+   rclcpp::Publisher<Float64>::SharedPtr erpm_pub_;
++  rclcpp::Publisher<Float64>::SharedPtr current_pub_;
++  rclcpp::Publisher<Float64>::SharedPtr brake_pub_;
+   rclcpp::Publisher<Float64>::SharedPtr servo_pub_;
+   rclcpp::Subscription<AckermannDriveStamped>::SharedPtr ackermann_sub_;
+ 
+diff --git a/vesc_ackermann/src/ackermann_to_vesc.cpp b/vesc_ackermann/src/ackermann_to_vesc.cpp
+index e26c4f1..5b6d60c 100644
+--- a/vesc_ackermann/src/ackermann_to_vesc.cpp
++++ b/vesc_ackermann/src/ackermann_to_vesc.cpp
+@@ -33,6 +33,7 @@
+ #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
+ #include <std_msgs/msg/float64.hpp>
+ 
++#include <algorithm>
+ #include <cmath>
+ #include <sstream>
+ #include <string>
+@@ -48,13 +49,31 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
+ : Node("ackermann_to_vesc_node", options)
+ {
+   // get conversion parameters
+-  speed_to_erpm_gain_ = declare_parameter("speed_to_erpm_gain").get<double>();
+-  speed_to_erpm_offset_ = declare_parameter("speed_to_erpm_offset").get<double>();
+-  steering_to_servo_gain_ = declare_parameter("steering_angle_to_servo_gain").get<double>();
+-  steering_to_servo_offset_ = declare_parameter("steering_angle_to_servo_offset").get<double>();
++  speed_to_erpm_gain_ = declare_parameter<double>("speed_to_erpm_gain");
++  speed_to_erpm_offset_ = declare_parameter<double>("speed_to_erpm_offset");
++  steering_to_servo_gain_ = declare_parameter<double>("steering_angle_to_servo_gain");
++  steering_to_servo_offset_ = declare_parameter<double>("steering_angle_to_servo_offset");
+ 
+-  // create publishers to vesc electric-RPM (speed) and servo commands
++  // motor command mode and current-control parameters (defaults keep legacy speed/eRPM behavior)
++  control_mode_ = declare_parameter<std::string>("control_mode", "speed");
++  max_speed_ = declare_parameter<double>("max_speed", 5.0);
++  max_current_ = declare_parameter<double>("max_current", 50.0);
++  min_current_ = declare_parameter<double>("min_current", 8.0);
++  brake_current_ = declare_parameter<double>("brake_current", 10.0);
++  current_deadband_ = declare_parameter<double>("current_deadband", 0.05);
++  min_erpm_ = declare_parameter<double>("min_erpm", 4000.0);
++  max_erpm_ = declare_parameter<double>("max_erpm", 10000.0);
++  erpm_deadband_ = declare_parameter<double>("erpm_deadband", 0.05);
++
++  std::transform(
++    control_mode_.begin(), control_mode_.end(), control_mode_.begin(),
++    [](unsigned char c) {return std::tolower(c);});
++  RCLCPP_INFO(get_logger(), "ackermann_to_vesc control_mode: %s", control_mode_.c_str());
++
++  // create publishers to vesc electric-RPM (speed), current, brake, and servo commands
+   erpm_pub_ = create_publisher<Float64>("commands/motor/speed", 10);
++  current_pub_ = create_publisher<Float64>("commands/motor/current", 10);
++  brake_pub_ = create_publisher<Float64>("commands/motor/brake", 10);
+   servo_pub_ = create_publisher<Float64>("commands/servo/position", 10);
+ 
+   // subscribe to ackermann topic
+@@ -64,19 +83,57 @@ AckermannToVesc::AckermannToVesc(const rclcpp::NodeOptions & options)
+ 
+ void AckermannToVesc::ackermannCmdCallback(const AckermannDriveStamped::SharedPtr cmd)
+ {
+-  // calc vesc electric RPM (speed)
+-  Float64 erpm_msg;
+-  erpm_msg.data = speed_to_erpm_gain_ * cmd->drive.speed + speed_to_erpm_offset_;
+-
+-  // calc steering angle (servo)
++  // calc steering angle (servo) -- identical in both control modes
+   Float64 servo_msg;
+   servo_msg.data = steering_to_servo_gain_ * cmd->drive.steering_angle + steering_to_servo_offset_;
+ 
+-  // publish
+-  if (rclcpp::ok()) {
++  if (!rclcpp::ok()) {
++    return;
++  }
++
++  if (control_mode_ == "erpm") {
++    // Closed-loop speed with a floor: any throttle past the deadband jumps straight to
++    // min_erpm so the wheels spin fast enough to carry over obstacles, scaling up to
++    // max_erpm at full stick. Avoids both the low-speed stall (smoke) and the stiction
++    // dead zone. The VESC's speed PID handles current internally (bound by the firmware
++    // motor current limit -- set that low in VESC Tool for stall protection).
++    double throttle = max_speed_ > 0.0 ? cmd->drive.speed / max_speed_ : 0.0;
++    throttle = std::clamp(throttle, -1.0, 1.0);
++    Float64 erpm_msg;
++    if (std::abs(throttle) < erpm_deadband_) {
++      erpm_msg.data = 0.0;  // released -> coast to stop
++    } else {
++      double magnitude = min_erpm_ + std::abs(throttle) * (max_erpm_ - min_erpm_);
++      erpm_msg.data = std::copysign(magnitude, throttle);
++    }
++    erpm_pub_->publish(erpm_msg);
++  } else if (control_mode_ == "current") {
++    // Direct torque control: map the throttle stick to motor current so the car moves off the
++    // line at low stick instead of waiting for the closed-loop speed PID to wind up current to
++    // overcome stiction. A min_current feed-forward guarantees the first bit of stick already
++    // commands enough torque to break free.
++    double throttle = max_speed_ > 0.0 ? cmd->drive.speed / max_speed_ : 0.0;
++    throttle = std::clamp(throttle, -1.0, 1.0);
++
++    if (std::abs(throttle) < current_deadband_) {
++      // stick released -> active brake (prevents freewheeling)
++      Float64 brake_msg;
++      brake_msg.data = brake_current_;
++      brake_pub_->publish(brake_msg);
++    } else {
++      double magnitude = min_current_ + std::abs(throttle) * (max_current_ - min_current_);
++      Float64 current_msg;
++      current_msg.data = std::copysign(magnitude, throttle);
++      current_pub_->publish(current_msg);
++    }
++  } else {
++    // Legacy closed-loop speed (eRPM) control
++    Float64 erpm_msg;
++    erpm_msg.data = speed_to_erpm_gain_ * cmd->drive.speed + speed_to_erpm_offset_;
+     erpm_pub_->publish(erpm_msg);
+-    servo_pub_->publish(servo_msg);
+   }
++
++  servo_pub_->publish(servo_msg);
+ }
+ 
+ }  // namespace vesc_ackermann
+diff --git a/vesc_ackermann/src/vesc_to_odom.cpp b/vesc_ackermann/src/vesc_to_odom.cpp
+index 86dc28d..1f20fa8 100644
+--- a/vesc_ackermann/src/vesc_to_odom.cpp
++++ b/vesc_ackermann/src/vesc_to_odom.cpp
+@@ -60,13 +60,13 @@ VescToOdom::VescToOdom(const rclcpp::NodeOptions & options)
+   base_frame_ = declare_parameter("base_frame", base_frame_);
+   use_servo_cmd_ = declare_parameter("use_servo_cmd_to_calc_angular_velocity", use_servo_cmd_);
+ 
+-  speed_to_erpm_gain_ = declare_parameter("speed_to_erpm_gain").get<double>();
+-  speed_to_erpm_offset_ = declare_parameter("speed_to_erpm_offset").get<double>();
++  speed_to_erpm_gain_ = declare_parameter<double>("speed_to_erpm_gain");
++  speed_to_erpm_offset_ = declare_parameter<double>("speed_to_erpm_offset");
+ 
+   if (use_servo_cmd_) {
+-    steering_to_servo_gain_ = declare_parameter("steering_angle_to_servo_gain").get<double>();
+-    steering_to_servo_offset_ = declare_parameter("steering_angle_to_servo_offset").get<double>();
+-    wheelbase_ = declare_parameter("wheelbase").get<double>();
++    steering_to_servo_gain_ = declare_parameter<double>("steering_angle_to_servo_gain");
++    steering_to_servo_offset_ = declare_parameter<double>("steering_angle_to_servo_offset");
++    wheelbase_ = declare_parameter<double>("wheelbase");
+   }
+ 
+   publish_tf_ = declare_parameter("publish_tf", publish_tf_);

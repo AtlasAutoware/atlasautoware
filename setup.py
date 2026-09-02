@@ -37,6 +37,9 @@ setup(
             'oakd_camera = f1tenth_gym_ros.oakd_camera:main',
             'velocity_ekf = f1tenth_gym_ros.velocity_ekf:main',
             'autodrive_bridge = f1tenth_gym_ros.autodrive_bridge:main',
+            'imu_optical_to_body = f1tenth_gym_ros.imu_optical_to_body:main',
+            'gamepad_teleop = f1tenth_gym_ros.gamepad_teleop:main',
+            'hw_diag = f1tenth_gym_ros.hw_diag:main',
         ],
     },
 )

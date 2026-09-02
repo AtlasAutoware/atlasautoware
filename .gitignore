@@ -134,3 +134,8 @@ dmypy.json
 runtime/
 
 .claude/
+
+# colcon (this repo is built in-place on the Jetson)
+install/
+log/
+26.1.2

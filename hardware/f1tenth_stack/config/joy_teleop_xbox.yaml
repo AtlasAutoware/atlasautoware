@@ -1,0 +1,52 @@
+joy:
+  ros__parameters:
+    # device_name: /dev/input/xbox
+    device_id: 0
+    deadzone: 0.05
+    autorepeat_rate: 20.0
+    coalesce_interval: 0.01
+
+joy_teleop:
+  ros__parameters:
+    default:
+      type: topic
+      interface_type: ackermann_msgs/msg/AckermannDriveStamped
+      topic_name: teleop
+      axis_mappings:
+        drive-speed:
+          axis: 1
+          scale: 0.0
+          offset: 0.0
+        drive-steering_angle:
+          axis: 2
+          scale: 0.0
+          offset: 0.0
+
+    # Bluetooth Xbox Series controller, as measured on THIS car via /dev/input/js0:
+    #   axis 1 = left stick Y  -> throttle (joy_node reports forward = +1.0)
+    #   axis 2 = right stick X -> steering
+    #   button 6 = LB (deadman, hold to drive),  button 7 = RB (autonomous deadman)
+    # (BT Xbox buttons are non-contiguous: A=0,B=1,X=3,Y=4,LB=6,RB=7,View=10,Menu=11.)
+    human_control:
+      type: topic
+      interface_type: ackermann_msgs/msg/AckermannDriveStamped
+      topic_name: teleop
+      deadman_buttons: [6]
+      axis_mappings:
+        drive-speed:
+          axis: 1
+          scale: 5.0
+          offset: 0.0
+        drive-steering_angle:
+          axis: 2
+          scale: 0.34
+          offset: 0.0
+
+    autonomous_control:
+      type: topic
+      interface_type: std_msgs/msg/Int8
+      topic_name: /dev/null
+      deadman_buttons: [7]
+      message_value:
+        data:
+          value: 0

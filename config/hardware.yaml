@@ -27,14 +27,24 @@ drive_node:
     steer_center_us: 1500.0
     steer_half_range_us: 400.0
     # vesc-uart backend (direct serial; also publishes wheel-speed odom)
-    serial_port: '/dev/ttyACM0'
+    serial_port: '/dev/sensors/vesc'   # udev symlink (0483:5740) -> ttyACM*, stable across replugs
     serial_baud: 115200
-    erpm_gain: 4614.0           # erpm per m/s — RE-MEASURE for the NEW sensored
-                                # motor + FSESC 6.7: erpm_gain = (poles/2) * gear
-                                # ratio * 60 / (pi * wheel_dia_m). Wrong gain =
-                                # wrong speed scaling AND wrong odometry. Calibrate:
-                                # command 2.0 m/s, measure true speed over 5 m,
-                                # scale gain until they match.
+    erpm_gain: 3575.0           # erpm per m/s = 60*FDR(10.2)*pole_pairs(2)/(pi*0.109 m tire); Castle 1415 4-pole
+                                # Calibrate: command 2.0 m/s, measure true speed over 5 m,
+                                # scale gain until they match (wrong gain = wrong speed
+                                # scaling AND wrong odometry).
+    # motor command mode — mirrors f1tenth_stack/config/vesc.yaml so self-driving
+    # launches like the manual joystick path instead of stalling under the RPM
+    # loop's low-speed stiction dead zone (~30-35 A).
+    #   'current': planner speed -> motor current (instant torque off the line)
+    #   'speed'  : SET_RPM closed-loop (accurate m/s tracking at racing pace; the
+    #              old behavior). Switch back for high-speed MPC laps if you want
+    #              the planner's speed profile tracked exactly.
+    control_mode: 'current'
+    max_current: 45.0           # A at full-speed cmd (FSESC 6.7 firmware l_current_max = 60, set 2026-09-02)
+    min_current: 10.0           # A feed-forward to break stiction off the line
+    brake_current: 15.0         # A brake when ~zero speed requested (regen lim 30)
+    current_deadband: 0.05      # |speed/max_speed| below this -> brake
     odom_topic: '/vesc/odom'
     odom_frame: 'odom'
     base_frame: 'base_link'
@@ -42,8 +52,8 @@ drive_node:
 
 rplidar_node:
   ros__parameters:
-    port: '/dev/ttyUSB0'
-    baudrate: 115200            # A1/A2: 115200, A3/S1: 256000
+    port: '/dev/sensors/rplidar'  # stable udev symlink (CP210x 10c4:ea60); not volatile ttyUSB0
+    baudrate: 460800            # RPLIDAR C1 = 460800 (A1/A2: 115200, A3/S1: 256000)
     scan_topic: '/scan'
     frame_id: 'laser'
     num_bins: 720
@@ -54,11 +64,15 @@ rplidar_node:
 
 velocity_ekf:
   ros__parameters:
-    imu_topic: '/oakd/imu'
+    imu_topic: '/oakd/imu'      # Orbbec backend: /camera/gyro_accel/sample remapped here by car_bringup_launch.py
     wheel_odom_topic: '/vesc/odom'  # only published by the vesc-uart backend
     out_topic: '/ekf/odom'
     l_r: 0.17145                # m, CG to rear axle
 
+# Camera on the car is an Orbbec Gemini 335 (camera_backend:=orbbec, the default).
+# Its driver is launched + remapped in launch/car_bringup_launch.py (official
+# orbbec_camera node: 640x480@30 color, accel+gyro 200 Hz synced, depth off unless
+# use_depth:=true). The oakd_camera params below only apply to camera_backend:=oakd.
 oakd_camera:
   ros__parameters:
     width: 640
@@ -101,3 +115,29 @@ raceline_mpc:
     profile_v_max: 8.0          # m/s profile ceiling
     v_scale: 0.5                # global speed cap — raise as confidence grows
     control_hz: 50.0
+
+gamepad_teleop:
+  ros__parameters:
+    joy_topic: '/joy'
+    drive_topic: '/drive'
+    # DualSense Wireless Controller button layout
+    deadman_button: 4             # L1  — must hold for any motion
+    turbo_button: 5               # R1  — raises speed limit to max_speed
+    estop_button: 0               # Cross (×) — latching e-stop
+    # DualSense axis layout (as reported by ros2 joy_node)
+    #   0: left stick X  (-1=right, +1=left)
+    #   1: left stick Y  (+1=forward/up)
+    #   2: right stick X
+    #   3: L2 trigger    (rest=+1, full pull=-1)
+    #   4: R2 trigger    (rest=+1, full pull=-1)
+    #   5: right stick Y
+    throttle_axis: 1              # left stick Y (+1 forward)
+    steer_axis: 0                 # left stick X (+1 left)
+    brake_axis: 4                 # R2 trigger
+    brake_invert: true            # DualSense triggers rest at +1, not -1
+    # Speed limits (start conservative — raise after successful test laps)
+    safe_speed: 2.0               # m/s without turbo
+    max_speed: 4.0                # m/s with turbo (R1) held
+    max_steer: 0.41               # rad — match drive_node max_steer
+    steer_gain: 1.0               # scale 0–1 to reduce steering sensitivity
+    publish_hz: 20.0

@@ -1,3 +1,4 @@
+from rclpy.qos import qos_profile_sensor_data
 """
 Raceline-MPC racing agent — the clean competition car.
 =======================================================
@@ -169,7 +170,7 @@ class RacelineMPC(Node):
         self._log = 0
         self._cone_key = None                           # cached AEB cone mask
         self._cone_mask = None
-        self.create_subscription(LaserScan, scan_topic, self._scan_cb, 10)
+        self.create_subscription(LaserScan, scan_topic, self._scan_cb, qos_profile_sensor_data)
         self.create_subscription(Odometry, odom_topic, self._odom_cb, 10)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, drive_topic, 10)
         self.create_timer(1.0 / float(self.get_parameter('control_hz').value), self._loop)
