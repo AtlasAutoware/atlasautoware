@@ -58,7 +58,8 @@
 \lstset{style=mystyle}
 \graphicspath{{figures/}}
 
-\title{AtlasAutoware: Taking a 1/10-Scale Autonomous Race Car from Simulation to Hardware}
+\title{From a Wall-Following Car to a Data-Producing Robot:\\
+Rebuilding a 1/10-Scale Platform as Substrate for a Learned Driving Policy}
 \author{Eshan Iyer}
 \date{\today}
 
@@ -71,34 +72,55 @@ This project picks up the 1/10-scale self-driving car in the SysLab annex where 
 2024 Senior Research work left it \cite{gagvani2024}. That report ended with a car
 that could follow a hallway wall using a hobby ESC, a PWM breakout board and the
 DonkeyCar library, and it recommended that the next group not deviate from the
-F1TENTH bill of materials, because every substitution costs weeks. I took that advice
-in one direction and ignored it in another: I rebuilt the actuation around the VESC
-motor controller that the previous report gave up on, so that the car speaks the same
-interfaces as the F1TENTH reference platform \cite{f1tenth, f1tenthsystem}, but I kept
-the sensors the lab actually owns (a Slamtec RPLIDAR C1 and an Orbbec Gemini 335) rather
-than the Hokuyo and OAK-D the reference design assumes.
+F1TENTH bill of materials, because every substitution costs weeks.
 
-The goal was a car that runs our team's simulation racing stack, AtlasAutoware
-\cite{atlasrepo, atlaspaper}, on real hardware with the fewest possible changes to the
-software. The stack was written against the F1TENTH gym simulator, and the plan was to
-keep the planner and controller untouched and only swap the sensor and actuator layers.
-I divided the work into three stages:
+My intended contribution is a vision-language driving policy: take an open
+vision-language-action or vision-language-navigation checkpoint --- Alibaba's
+Qwen-Robot suite \cite{qwenrobot} is the current example, but the argument does not
+depend on which one --- and post-train it on data from this car so that it follows
+natural-language goals (``go to the end of the hall and stop before the door'') rather
+than a precomputed raceline. A second car, built from the same parts list, then makes
+agent-to-agent experiments possible: two vehicles sharing pose and intent over the
+network.
+
+That is not what most of this year was spent on, and the gap is the point of this
+report. A policy of that kind is only as good as the robot underneath it, and the robot
+I inherited could not have produced usable training data at all. It could not report how
+fast its wheels were turning, so an ``action'' recorded during a demonstration would have
+been an uncalibrated PWM pulse. It had no inertial measurement, so there was no
+proprioceptive state to condition on and no way to tell a skid from a straight line. It
+could only be driven by a human standing in the same room with a wired gamepad, which
+caps a dataset at the length of a USB cable and one operator's patience. And it existed
+as one physical artifact with its configuration living in a single laptop, so a second
+car was not a build --- it was an archaeology project.
+
+So the work reported here is architectural, and I frame it that way: each change is
+justified by what it makes possible downstream, not by the lap time it saves.
 
 \begin{enumerate}
-  \item Actuation: make the VESC drive the motor and steering reliably from the Jetson,
-        in closed loop, with usable odometry.
-  \item Sensing: bring the lidar and the camera into ROS~2 in the exact shape the
-        racing stack expects, including the camera's inertial measurement unit.
-  \item Perception: train and deploy a detector for other F1TENTH cars so the
-        head-to-head agent has a second source of opponent positions.
+  \item \textbf{Actuation with feedback.} Rebuild the drivetrain around the VESC motor
+        controller the previous report gave up on, so commands are currents and speeds
+        with measured consequences --- the label side of a demonstration.
+  \item \textbf{Sensing in the policy's coordinate frame.} Bring the lidar and camera
+        into ROS~2 in the shape the stack expects, including the camera's inertial unit,
+        which supplies proprioception, de-skews the lidar, and feeds the traction governor.
+  \item \textbf{Teleoperation as a data channel.} Make the car drivable from a browser
+        over its own network, so demonstrations can be collected by anyone, anywhere, with
+        the same message the policy will later emit.
+  \item \textbf{Reproducibility as infrastructure.} Put the configuration, firmware
+        state and scripts in the repository, so the second car is a clone rather than a
+        rebuild.
 \end{enumerate}
 
-All three stages were completed and are checked into the team repository, together
-with a \texttt{hardware/} folder that lets someone rebuild the car's configuration from
-GitHub. What has not been done is validate the autonomous controller on the floor with
-the new drivetrain; the competition that was the deadline for that (Boston, September
-6--7, 2026) was cancelled when most of the team withdrew. The Results section
-separates what was measured from what still needs a track.
+Perception is where the two halves meet: I trained and deployed a car detector on the
+platform, which is both immediately useful for head-to-head racing and a rehearsal of the
+train-offline, deploy-on-the-robot loop the pivot needs. All of it is checked into the
+team repository \cite{atlasrepo}. What has \emph{not} been done is validate the
+autonomous controller on the floor with the new drivetrain --- the competition that was
+the deadline (Boston, September 6--7, 2026) was cancelled when most of the team
+withdrew, which is also what freed the project to pivot. The Results section separates
+what was measured from what still needs a track, and the Pivot section states what
+remains before a policy can be trained.
 
 \section*{Prior Approaches}
 
@@ -139,7 +161,10 @@ car.
   \caption{The car as built. Blue: sensors. Green: the two ROS~2 workspaces on the
   Jetson. Amber: the power and actuation chain. Grey: the development laptop and the
   repository. Only one workspace talks to the VESC at a time; the autonomy launcher
-  stops the manual stack before it starts.}
+  stops the manual stack before it starts. Read as substrate for the pivot: the sensor
+  row is the observation space, the amber chain is the action space with feedback, and
+  the manual stack's teleoperation path is where a policy server later attaches
+  (Figure~\ref{fig:pivot}).}
   \label{fig:arch}
 \end{figure}
 
@@ -184,7 +209,15 @@ camera, lidar and battery are all different; the chassis, Jetson and servo are t
   \label{tab:parts}
 \end{table}
 
-\section*{Stage 1: Actuation}
+\section*{Stage 1: Actuation --- making the action space real}
+
+A demonstration is a pair: what the world looked like, and what the driver did. The
+second half is worthless if ``what the driver did'' cannot be measured. The 2024 car
+commanded a hobby ESC with a unitless PWM pulse and got nothing back, so its own report
+notes that throttle could not be calibrated at all and that the same pulse produced
+different speeds on different surfaces. Any policy trained on those labels would be
+learning a mapping that does not exist. Rebuilding around the VESC is what turns the
+action space into currents and speeds with measured consequences.
 
 \subsection*{Getting the VESC to drive the motor}
 
@@ -246,7 +279,12 @@ commands current or speed, publishes wheel-speed odometry at 20\,Hz and logs bat
 voltage, MOSFET temperature and fault codes. On the bench the VESC held commanded speeds
 of 1500, 3500, 6000 and 9000 electrical RPM to within 1\% at 1.5--3\,A.
 
-\section*{Stage 2: Sensing}
+\section*{Stage 2: Sensing --- observations and proprioception}
+
+A vision-language policy conditions on what the robot sees and, if it is to drive
+rather than sightsee, on how the robot is moving. This stage supplies both, in the
+coordinate conventions the rest of the stack (and any policy trained on its logs)
+assumes.
 
 \subsection*{Lidar}
 
@@ -288,7 +326,43 @@ With the car level and still, the rotated IMU reports gravity on body $+z$ at
 9.75\,m/s$^2$, and \texttt{/ekf/odom} publishes at 200\,Hz whenever the VESC odometry
 is present.
 
-\section*{Stage 3: Perception}
+\section*{Stage 3: Teleoperation as a data channel}
+
+The 2024 car was driven by a person holding a wired gamepad next to it. That is a hard
+ceiling on demonstration data: one operator, one room, one cable. It also means the
+human's commands and the eventual policy's commands would enter the system through
+different doors, so a policy could not be dropped into the same slot the human occupied.
+
+I replaced it with a single ROS~2 node, \texttt{web\_pilot}, and made the car its own
+access point. The node serves one page: the camera stream as MJPEG, keyboard (W/S
+throttle, A/D steering) and browser-gamepad input, a lidar plot, and link and battery
+telemetry. Commands are posted as JSON at 30\,Hz and republished as
+\texttt{sensor\_msgs/Joy}, so the unmodified F1TENTH teleoperation chain drives the car;
+a policy server emits exactly the same message. Only the tab that is actually driving
+sends commands, so other viewers cannot interfere, and if nothing arrives for 250\,ms the
+node publishes neutral, which releases the dead-man and stops the car; the VESC's own
+one-second timeout sits behind that.
+
+The network is a mode, not a fixed choice, because collecting varied data means driving
+in varied places: the car can be its own 5\,GHz hotspot (highest bandwidth, tens of
+metres), its own 2.4\,GHz hotspot (roughly double the range), or a client on an existing
+mesh network, in which case it roams between nodes and the usable area becomes the mesh's
+footprint. With an internet uplink --- a tethered phone or an LTE modem --- and a
+WireGuard overlay, the same page works from anywhere, at 60--150\,ms of latency and a
+reduced video setting. A steering trim (the car pulls right, and mechanical adjustment
+did not remove it) is applied on the car to every input source and persisted across
+restarts.
+
+Two robustness details came out of real use. The VESC's USB port re-enumerates when the
+car is knocked hard enough, and the F1TENTH VESC driver aborts when its serial port
+disappears --- leaving the web page happily up and the car deaf; the driver, the Ackermann
+converter and the joystick node now respawn automatically. And an early version of the
+gamepad bridge published its axes with the sign convention of the SDL joystick API rather
+than that of ROS, so throttle and steering were mirrored: the same class of frame
+mismatch as the camera IMU below, and a reminder that a data pipeline silently learns
+whatever convention error you leave in it.
+
+\section*{Stage 4: Perception --- and a rehearsal of the training loop}
 
 \subsection*{Why a car detector}
 
@@ -365,41 +439,120 @@ was raised from 0.35 to 0.5. The node is off by default in the car launch and en
 with \texttt{use\_perception:=true}, since it costs a CPU core and only the head-to-head
 agent uses it.
 
-\section*{What Is Different About This System}
+\section*{What the Architecture Buys}
 
-Most of the individual pieces exist elsewhere; the combination and a few of the
-methods do not.
+Most of the individual pieces exist elsewhere. What matters here is that each one
+removes a specific obstacle between this car and a learned policy.
 
-\paragraph{The planner never changed.} The MPC, the velocity profiler, the raceline
-tools and the traction governor are the same code that runs in the simulator. Every
-hardware difference was absorbed in three places: the drive node's backend, a camera
-relay, and configuration. This is the parity the AtlasAutoware paper argued for
-\cite{atlaspaper}, and it held on real hardware.
+\paragraph{Actions became measurable quantities.} The 2024 build could only send a PWM
+pulse and hear nothing back. This car reports wheel speed at 20\,Hz, battery voltage and
+temperatures, and accepts current commands directly. A logged demonstration is now
+(observation, action, outcome) with all three in physical units --- and the same closed
+loop is what let the current-mode launch fix the low-speed stall.
 
-\paragraph{Closed-loop actuation with direct torque authority.} The 2024 build could
-only send a PWM pulse. This car reports wheel speed at 20\,Hz, battery voltage and
-temperatures, and lets the controller command current rather than speed, which is what
-removed the launch stall.
+\paragraph{The camera is a motion sensor first.} The Orbbec's most valuable output is
+its 200\,Hz inertial stream: it supplies the proprioceptive state a policy conditions on,
+de-skews the lidar so scans are geometrically honest at speed, and gives the traction
+governor a yaw rate. Vision is its second job.
 
-\paragraph{The camera is a motion sensor first.} The Orbbec's main contribution to lap
-time is its IMU: it makes the lidar scans geometrically honest at speed and gives the
-governor a yaw rate to react to. The vision model is the second use, not the first.
+\paragraph{One command channel for humans and policies.} Teleoperation, the joystick,
+the Python client and any future policy server all publish the same
+\texttt{sensor\_msgs/Joy}, behind the same watchdog. Swapping a human for a model is a
+change of sender, not a change of architecture --- and the safety envelope does not care
+which one is talking.
 
-\paragraph{Firmware-level diagnosis.} Being able to read and write the VESC's full
-configuration from the Jetson without VESC~Tool turned a silent failure into a
-one-line diagnosis, and it makes the motor controller's state part of the repository
-rather than something that lives in one laptop's settings.
+\paragraph{The dataset is not room-shaped.} Browser teleoperation over selectable
+network modes means demonstrations can be collected by anyone with a link, in any space
+the network reaches, on any device. That is the difference between a few hundred episodes
+and a few thousand.
+
+\paragraph{Firmware-level diagnosis, and firmware in the repository.} Reading and
+writing the VESC's full configuration from the Jetson turned a silent failure into a
+one-line diagnosis, and it makes the motor controller's state a versioned artifact
+instead of something living in one laptop's settings.
 
 \paragraph{Negatives from the deployed camera.} Public datasets tell a detector what a
-car looks like; only the target camera can tell it what the false alarms look like.
-Two minutes of recording eliminated all 21 false detections.
+car looks like; only the target camera can tell it what the false alarms look like. Two
+minutes of recording eliminated all 21 false detections --- the smallest possible version
+of the lesson that on-robot data beats more internet data.
 
 \paragraph{Reproducibility as a deliverable.} The \texttt{hardware/} folder holds the
-F1TENTH configuration overrides, the patch to the VESC driver, the udev rules that
-give the gamepad, lidar, VESC and camera stable names and permissions, the VESC
-configuration blobs and the tools that restore them, and a runbook of the failures
-described above. The 2024 report's main recommendation was to reduce the time a new
-group spends rediscovering the car; this folder is the concrete form of that.
+F1TENTH configuration overrides, the patch to the VESC driver, the udev rules that give
+the gamepad, lidar, VESC and camera stable names and permissions, the VESC configuration
+blobs and the tools that restore them, the network and launch scripts, and a runbook of
+the failures described above. This is what makes ``build a second car'' a parts order
+rather than a research project, and a second car is what makes agent-to-agent work
+possible at all.
+
+\section*{The Pivot: A Post-Trained Driving Policy}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{pivot_pipeline.pdf}
+  \caption{The intended pipeline. The platform work described above supplies the left
+  box (data with real actions and proprioception, collected by anyone over the network),
+  and the safety and control loops in the right box that a remote policy cannot be
+  trusted to provide.}
+  \label{fig:pivot}
+\end{figure}
+
+\subsection*{What the policy would be}
+
+Recent robotics foundation models pair a vision-language backbone with an action head
+and are explicitly meant to be post-trained on a target platform's data. Alibaba's
+Qwen-Robot suite \cite{qwenrobot} is the current instance --- a navigation model, a
+manipulation model and a video world model, released as a stack --- and open
+vision-language-action checkpoints such as OpenVLA \cite{openvla}, $\pi_0$
+\cite{pi0} and NVIDIA's GR00T~N1 \cite{groot} occupy the same slot. The plan does not
+depend on the choice; it depends on the interface. All of them consume images, a
+natural-language instruction and some proprioceptive state, and emit a short chunk of
+future actions.
+
+For this car the mapping is direct: the Orbbec's colour frames and the instruction text
+are the inputs, the velocity EKF's speed and yaw rate are the proprioception, and the
+action is the pair (steering angle, speed) that the Ackermann chain already accepts. The
+lidar is the one input these models were not designed for; the cheap first approach is to
+render each scan as a small bird's-eye image and let the vision encoder see it, with a
+learned range tokenizer as the more principled second version. The training objective is
+imitation on teleoperated episodes, with the raceline MPC available as a second source of
+demonstrations that are smoother and more consistent than a human's.
+
+\subsection*{What has to be built}
+
+Three things, none of which need new hardware. First, an \emph{episode logger}: a node
+that records synchronized camera, lidar, IMU, odometry and command streams into a
+standard imitation-learning format (LeRobot's dataset layout is the obvious target) with
+an instruction string attached per episode, plus a way to mark an episode good or bad
+without stopping. Second, a \emph{policy server}: the 2--4\,B-parameter models in this
+class will not run at a useful rate on an Orin Nano, so inference belongs on the laptop
+or a rented GPU, with the car keeping every fast loop --- watchdog, emergency braking,
+traction governance, the 50\,Hz current loop --- and treating the policy as one more
+source of \texttt{/cmd} messages, subject to the same timeout. Third, \emph{evaluation}:
+success rate on held-out instructions in the hallway, plus offline action-prediction
+error on held-out drives so the model can be compared without risking the car.
+
+\subsection*{Two cars}
+
+The second car is the part the \texttt{hardware/} folder was written for. With two
+vehicles on one network, each publishing pose, velocity and intended waypoints --- over
+ROS~2 with a Zenoh middleware, or the same small JSON messages the web pilot already
+uses --- the experiments become leader--follower, shared-goal navigation, and cooperative
+overtaking, and the interesting questions turn into how much bandwidth a useful ``intent''
+message actually needs and how gracefully behaviour degrades as the link does. The
+network work in Stage~3 is what determines how far apart the two cars can be while that
+holds, which is why it belongs in this report rather than in a footnote about
+convenience.
+
+\subsection*{Honest risks}
+
+The Orin Nano cannot host these models, so the split-inference design is a constraint,
+not a preference, and it puts a network link inside the control loop --- acceptable at
+hallway speeds with a watchdog, not acceptable at racing speeds. Post-training a model of
+this size on a laptop GPU means parameter-efficient fine-tuning and a modest dataset;
+a few hundred episodes from one hallway will produce a policy that is good at that
+hallway. And every VLA result I am building on is reported by its authors on their own
+platforms, mostly manipulators; whether they transfer to a fast Ackermann vehicle with a
+20\,cm wheelbase is exactly the open question, which is the honest reason to attempt it.
 
 \section*{Results}
 \label{sec:results}
@@ -422,6 +575,8 @@ wheels off the ground or the car stationary.
     Speed tracking on a stand & commanded 1500 / 3500 / 6000 / 9000 eRPM; measured 1472 / 3493 / 5986 / 9006 \\
     Gamepad path, manual stack & full throttle held 10\,000 eRPM at 3--4\,A; steering full range \\
     Detector on the Jetson CPU & 58\,ms per frame at 416\,px; 0 false detections in 55\,s of hands and faces \\
+    Web teleoperation & command round trip 1--2\,ms over the USB link; commands republished at 50\,Hz;
+      steering follows to the servo limits; neutral within 250\,ms of the last packet \\
     \bottomrule
   \end{tabular}
   \caption{Hardware measurements.}
@@ -434,20 +589,37 @@ configuration are still the reference car's; the wheelbase and the lidar and cam
 mounting offsets in the static transforms are estimates, not measurements; the
 speed-to-RPM gain has been computed but not checked by driving a known distance; and the
 detector has only ever seen other F1TENTH cars in photographs, so its range estimate,
-which assumes a 0.30\,m car width, is unverified against a real opponent.
+which assumes a 0.30\,m car width, is unverified against a real opponent. On the
+teleoperation side, only the car's own 5\,GHz hotspot and the USB link have been driven
+through; the mesh-client, tethered and overlay-network paths are implemented and
+documented but not yet exercised, and no latency figures over cellular are claimed here.
+Nothing about the learned policy has been built --- the Pivot section is a plan, not a
+result.
 
-\section*{Recommendations for the Next Group}
+\section*{Next Steps}
 
-Drive a measured five metres in the manual stack and compare the odometry before
-trusting any autonomy. Calibrate the servo the way the 2024 report did (a range finder
-on the front wheel), then enter the centre and limits in both stacks' configuration.
-Install the JetPack CUDA and TensorRT packages when the Jetson is on a network that is
-not a captive portal; the perception node already prefers a TensorRT engine if one is
-present, and the 640-pixel ONNX export is in the repository for that purpose. Keep the
-battery connector keyed or marked: the VESC dies instantly on reversed leads, and a
-replacement took a week to arrive. Finally, read \texttt{hardware/RUNBOOK.md} before
-touching the VESC's application settings; the shared PPM/servo pin will look like a
-dead motor controller to anyone who does not know about it.
+The immediate platform work is unchanged and short: drive a measured five metres and
+compare the odometry before trusting any autonomy; calibrate the servo the way the 2024
+report did (a range finder on the front wheel) and enter the centre and limits in both
+stacks' configuration, which also removes the right-hand pull that the web trim currently
+masks; measure the wheelbase and the two sensor offsets. Install the JetPack CUDA and
+TensorRT packages when the Jetson is on a network that is not a captive portal --- the
+perception node already prefers a TensorRT engine if one is present, and the 640-pixel
+export is in the repository for that purpose.
+
+Then the pivot, in the order the risk suggests: build the episode logger and collect a
+first dataset while driving the hallway by hand, since that is useful regardless of which
+model wins; stand up a policy server against a small checkpoint and verify the
+timing and the safety envelope with a deliberately trivial policy before a real one; only
+then post-train and evaluate. Build the second car from the \texttt{hardware/} folder in
+parallel, because it is a parts order and a weekend rather than a research risk, and
+because every agent-to-agent question needs it.
+
+Two warnings for whoever picks this up. Keep the battery connector keyed or marked: the
+VESC dies instantly on reversed leads, and a replacement took a week to arrive. And read
+\texttt{hardware/RUNBOOK.md} before touching the VESC's application settings --- the
+shared PPM/servo pin will look like a dead motor controller to anyone who does not know
+about it.
 
 \section*{Acknowledgments}
 
