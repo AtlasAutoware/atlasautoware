@@ -57,3 +57,12 @@ Quick health check (second shell):
 - YOLOv8n car detector: models/car_yolov8.onnx (416, CPU/onnxruntime 17 fps) + _640 for TensorRT later.
 - Enable with use_perception:=true; feeds /camera_opponents_poses to race_agent only.
 - pip3 --user onnxruntime on the Jetson; if it installs NumPy 2, pip3 uninstall numpy (system 1.21 must win).
+
+## Remote pilot mode (2026-09-02)
+- The car is its own hotspot: SSID AtlasCar (NetworkManager connection, autoconnect, 5 GHz ch 36), car = 10.42.0.1.
+  Internet on the Jetson instead: sudo nmcli con up iPhone ; back: sudo nmcli con up AtlasCar.
+- On the car: ~/run_remote.sh (or ~/restart_remote.sh to bounce it). Then open http://10.42.0.1:8080/
+  (http://192.168.55.1:8080/ over USB-C): FPV stream, W/S throttle, A/D steer, max-throttle slider,
+  gamepad via the browser (hold LB), lidar plot. Release everything = neutral; 250 ms watchdog on the car.
+- Only the tab that is driving sends commands; other tabs are viewers. Python client: tools/remote_pilot.py (UDP 5005).
+- Never pkill by a pattern that appears in your own command line (it kills the shell); use the scripts.

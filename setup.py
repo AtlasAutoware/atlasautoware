@@ -40,6 +40,9 @@ setup(
             'imu_optical_to_body = f1tenth_gym_ros.imu_optical_to_body:main',
             'gamepad_teleop = f1tenth_gym_ros.gamepad_teleop:main',
             'hw_diag = f1tenth_gym_ros.hw_diag:main',
+            'remote_joy_bridge = f1tenth_gym_ros.remote_joy_bridge:main',
+            'mjpeg_server = f1tenth_gym_ros.mjpeg_server:main',
+            'web_pilot = f1tenth_gym_ros.web_pilot:main',
         ],
     },
 )
