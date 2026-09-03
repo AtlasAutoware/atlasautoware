@@ -40,7 +40,8 @@ if [ "${1:-}" != "novideo" ]; then
     ros2 launch orbbec_camera gemini_330_series.launch.py \
         enable_color:=true color_width:=640 color_height:=480 color_fps:=15 \
         $DEPTH_ARGS enable_point_cloud:=false enable_ir:=false \
-        enable_accel:=true enable_gyro:=true accel_rate:=200hz gyro_rate:=200hz \
+        enable_accel:=true enable_gyro:=true enable_sync_output_accel_gyro:=true \
+        accel_rate:=200hz gyro_rate:=200hz \
         log_level:=warn > /tmp/remote_camera.log 2>&1 &
     sleep 6
     # IMU into ROS body axes (proprioception for the episode logger; the racing stack does the same)
