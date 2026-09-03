@@ -24,7 +24,7 @@ cd ~/atlasautoware && bash ml/slurm/pipeline.sh      # submits env -> data -> te
 squeue -u $USER ; tail -f slurm_logs/*.out
 ```
 
-Jobs: `01_env` (venv on NFS, torch cu121), `02_data` (regenerates the sim dataset, ~1 ep/s,
+Jobs (all on the gpu partition: its nodes are python 3.12; the compute nodes are 3.14 with no CUDA torch wheels; unicron = 6x Quadro RTX 8000 48 GB): `01_env` (venv on NFS), `02_data` (regenerates the sim dataset, ~1 ep/s,
 600 episodes default), `03_teacher` (gpu partition, 2x Turing, downloads 13.8 GB once),
 `04_student` (1 GPU, ~40 epochs, exports ONNX).
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=atlas-data
-#SBATCH --partition=compute
+#SBATCH --partition=gpu
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=02:00:00
