@@ -46,6 +46,8 @@ setup(
             'track_from_image = f1tenth_gym_ros.track_from_image:main',
             'episode_logger = f1tenth_gym_ros.episode_logger:main',
             'depth_fusion = f1tenth_gym_ros.depth_fusion:main',
+            'particle_filter = f1tenth_gym_ros.mcl_localization:main',
+            'pose_relay = f1tenth_gym_ros.pose_relay:main',
         ],
     },
 )
