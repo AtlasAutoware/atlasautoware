@@ -116,6 +116,14 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>AtlasCar pilo
 overrides the policy (the mux gives teleop priority). Closing this tab stops the car.</div>
 
 <section>
+<h3>Goal policy (distilled student)</h3>
+<label>goal <input id="pinstr" type="text" placeholder="turn left, then go straight to the end and stop" style="width:290px"></label>
+<label>max speed <input id="pspd" type="range" min="0.2" max="1.5" step="0.1" value="0.6"> <span id="pspdv">0.6 m/s</span></label>
+<div style="margin-top:4px"><button id="pengage" style="background:#264;border-color:#4a7">ENGAGE POLICY</button>
+  <span style="font-size:11px;color:#999">needs models/student.onnx on the car; same STOP / Space / override as raceline</span></div>
+</section>
+
+<section>
 <h3>Record a demonstration</h3>
 <label>instruction <input id="instr" type="text" placeholder="follow the hallway to the doors and stop" style="width:290px"></label>
 <div style="margin-top:4px">
@@ -240,6 +248,13 @@ $('engage').onclick=()=>{
    .then(r=>r.json()).then(s=>{if(s.error){alert(s.error+(s.checks?'\n'+s.checks.filter(c=>!c.ok).map(c=>'- '+c.name+': '+c.detail).join('\n'):''));}else renderAuto(s);});
 };
 $('estop').onclick=()=>fetch('/auto/stop',{method:'POST'}).then(r=>r.json()).then(renderAuto);
+$('pspd').oninput=()=>{$('pspdv').textContent=$('pspd').value+' m/s';};
+$('pengage').onclick=()=>{
+  const g=$('pinstr').value.trim(); if(!g){alert('type a goal instruction');return;}
+  if(!confirm('Engage the goal policy?\nGoal: "'+g+'"\nThe car will move on its own. Space/Esc stops it; holding a key overrides it.'))return;
+  fetch('/auto/engage',{method:'POST',body:JSON.stringify({mode:'policy',instruction:g,max_speed:parseFloat($('pspd').value)})})
+   .then(r=>r.json()).then(s=>{if(s.error){alert(s.error+(s.checks?'\n'+s.checks.filter(c=>!c.ok).map(c=>'- '+c.name+': '+c.detail).join('\n'):''));}else renderAuto(s);});
+};
 $('odom').onchange=()=>fetch('/auto/odom',{method:'POST',body:JSON.stringify({odom_topic:$('odom').value})}).then(r=>r.json()).then(renderAuto);
 addEventListener('keydown',e=>{if((e.key===' '||e.key==='Escape')&&auto){e.preventDefault();$('estop').onclick();}});
 
@@ -378,14 +393,23 @@ class H(BaseHTTPRequestHandler):
         if u.path == '/auto/engage':
             try: d = json.loads(body.decode())
             except ValueError: self._json({'error': 'bad json'}, 400); return
+            with S['lock']: odom = S['odom_topic']; fusion_live = (time.time() - S['seen'].get('depth', 0)) < 1.0
+            scan_topic = '/scan_fused' if fusion_live else '/scan'    # depth-augmented when available
+            if d.get('mode') == 'policy':                              # mode 3: distilled student
+                a = ages()
+                checks = [c for c in SUP.preflight(a, '', odom)[1] if c['name'] in ('lidar /scan', 'VESC telemetry', 'battery')]
+                checks.append({'name': 'camera', 'ok': a.get('image') is not None and a['image'] < 1.5,
+                               'detail': 'no frames' if a.get('image') is None else f"{a['image']*1000:.0f} ms ago"})
+                if not all(c['ok'] for c in checks) and not d.get('override'):
+                    self._json({'error': 'preflight failed', 'checks': checks}, 409); return
+                SUP.heartbeat()
+                ok, msg = SUP.engage_policy(str(d.get('instruction', ''))[:200], d.get('max_speed', 0.6), scan_topic=scan_topic)
+                self._json(auto_status() if ok else {'error': msg}, 200 if ok else 400); return
             rl = os.path.basename(str(d.get('raceline', '')))
-            with S['lock']: odom = S['odom_topic']
             ok, checks = SUP.preflight(ages(), rl, odom)
             if not ok and not d.get('override'):
                 self._json({'error': 'preflight failed', 'checks': checks}, 409); return
             SUP.heartbeat()
-            with S['lock']: fusion_live = (time.time() - S['seen'].get('depth', 0)) < 1.0
-            scan_topic = '/scan_fused' if fusion_live else '/scan'    # depth-augmented when available
             ok, msg = SUP.engage(rl, d.get('v_scale', 0.3), odom, scan_topic=scan_topic,
                                  extra=d.get('extra') or {})
             self._json(auto_status(rl) if ok else {'error': msg}, 200 if ok else 400); return
@@ -542,7 +566,7 @@ class WebPilot(Node):
 
     def _img(self, m):
         now = time.time()
-        with S['lock']: v = dict(S['video'])
+        with S['lock']: v = dict(S['video']); S['seen']['image'] = now
         if now - self.last_jpg < 1.0 / max(1.0, v['fps']) or m.encoding not in ('rgb8', 'bgr8'): return
         self.last_jpg = now
         a = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, 3)

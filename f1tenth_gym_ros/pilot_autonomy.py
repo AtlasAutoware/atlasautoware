@@ -160,6 +160,26 @@ class Supervisor:
                '-p', f'imu_topic:={imu_topic}', '-p', 'drive_topic:=/drive']
         for k, v in (extra or {}).items():
             cmd += ['-p', f'{k}:={v}']
+        return self._launch(cmd, {'mode': 'raceline', 'raceline': os.path.basename(path),
+                                  'v_scale': v_scale, 'odom_topic': odom_topic}, env)
+
+    def engage_policy(self, instruction, max_speed, scan_topic='/scan', model='models/student.onnx',
+                      odom_topic='/odom', env=None):
+        """Mode 3: the distilled goal-conditioned student (policy_bridge) drives via /drive."""
+        if self.engaged():
+            return False, 'already engaged'
+        path = model if os.path.isabs(model) else os.path.join(REPO, model)
+        if not os.path.isfile(path):
+            return False, f'no model at {path} (train it on the cluster: ml/slurm/pipeline.sh)'
+        max_speed = max(0.1, min(2.0, float(max_speed)))
+        cmd = ['ros2', 'run', 'f1tenth_gym_ros', 'policy_bridge', '--ros-args',
+               '-p', f'model:={path}', '-p', f'instruction:={instruction}',
+               '-p', f'max_speed:={max_speed}', '-p', f'scan_topic:={scan_topic}',
+               '-p', f'odom_topic:={odom_topic}', '-p', 'drive_topic:=/drive']
+        return self._launch(cmd, {'mode': 'policy', 'instruction': instruction, 'max_speed': max_speed,
+                                  'model': os.path.basename(path)}, env)
+
+    def _launch(self, cmd, params, env=None):
         with self.lock:
             self.log = [f'$ {" ".join(cmd)}']
         try:
@@ -167,9 +187,9 @@ class Supervisor:
                                          stderr=subprocess.STDOUT, text=True, bufsize=1,
                                          preexec_fn=os.setsid)
         except OSError as e:
-            return False, f'could not start raceline_mpc: {e}'
+            return False, f'could not start {cmd[3]}: {e}'
         self.hb = time.time(); self.engaged_at = time.time(); self.last_stop = ''
-        self.params = {'raceline': os.path.basename(path), 'v_scale': v_scale, 'odom_topic': odom_topic}
+        self.params = params
         threading.Thread(target=self._pump, daemon=True).start()
         return True, 'engaged'
 

@@ -50,6 +50,7 @@ setup(
             'pose_relay = f1tenth_gym_ros.pose_relay:main',
             'sim_env = f1tenth_gym_ros.sim_env:main',
             'goal_expert = f1tenth_gym_ros.goal_expert:main',
+            'policy_bridge = f1tenth_gym_ros.policy_bridge:main',
         ],
     },
 )
