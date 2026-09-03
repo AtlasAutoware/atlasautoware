@@ -14,7 +14,7 @@ source "$VENV/bin/activate"
 pip install -q --upgrade pip
 # Turing GPUs -> CUDA 12.x wheels
 pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install -q numpy scipy pillow opencv-python-headless pandas pyarrow onnx \
+pip install -q numpy scipy pillow opencv-python-headless pandas pyarrow onnx onnxscript \
     "transformers>=4.45" accelerate safetensors huggingface_hub sentencepiece einops timm qwen-vl-utils pyyaml
 python - <<'PY'
 import torch, transformers, cv2, pandas, pyarrow

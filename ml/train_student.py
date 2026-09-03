@@ -60,25 +60,52 @@ def load_episode(root, ei, cache):
     return np.load(p)
 
 
+def build_cache(root, episodes, workers=8):
+    """Decode all episode videos into the cache in parallel (the slow, one-time step)."""
+    from multiprocessing import Pool
+    cache = os.path.join(root, '_cache')
+    todo = [ei for ei in episodes if not os.path.isfile(os.path.join(cache, f'ep{ei:06d}.npz'))]
+    if not todo: return
+    print(f'caching {len(todo)} episodes with {workers} workers...', flush=True)
+    t0 = time.time()
+    with Pool(workers) as p:
+        for i, _ in enumerate(p.imap_unordered(_cache_one, [(root, ei, cache) for ei in todo]), 1):
+            if i % 25 == 0: print(f'  {i}/{len(todo)} ({time.time()-t0:.0f}s)', flush=True)
+    print(f'cache done in {time.time()-t0:.0f}s', flush=True)
+
+
+def _cache_one(args):
+    root, ei, cache = args
+    load_episode(root, ei, cache); return ei
+
+
 class EpisodeSet(Dataset):
+    """All steps in a few big contiguous arrays. With fork-based DataLoader workers these are
+    shared copy-on-write, so N workers do not mean N copies of the frames (a list of
+    per-frame objects would be duplicated by every worker through refcount page writes)."""
     def __init__(self, root, episodes, tasks, teacher=None, tdim=0, cache=None):
-        self.items = []; self.tf = teacher; self.tdim = tdim
+        self.tf = teacher; self.tdim = tdim
+        F, B, S, A, I, E, K = [], [], [], [], [], [], []
         for ei in episodes:
             e = load_episode(root, ei, cache or os.path.join(root, '_cache'))
-            ids = np.asarray(text_ids(tasks[int(e['task'])]), np.int64)
-            for k in range(len(e['act'])):
-                self.items.append((e['front'][k], e['bev'][k], e['state'][k], ids, e['act'][k], int(ei), k))
-    def __len__(self): return len(self.items)
+            n = len(e['act']); ids = np.asarray(text_ids(tasks[int(e['task'])]), np.int64)
+            F.append(e['front']); B.append(e['bev']); S.append(e['state']); A.append(e['act'])
+            I.append(np.repeat(ids[None], n, 0)); E.append(np.full(n, int(ei), np.int32)); K.append(np.arange(n, dtype=np.int32))
+        self.front = np.concatenate(F); self.bev = np.concatenate(B); self.state = np.concatenate(S)
+        self.act = np.concatenate(A); self.ids = np.concatenate(I); self.ep = np.concatenate(E); self.k = np.concatenate(K)
+        if teacher is not None:   # dense teacher table aligned to steps (zeros where missing)
+            self.tfeat = np.zeros((len(self.act), tdim), np.float32); self.has_t = np.zeros(len(self.act), np.float32)
+            for i in range(len(self.act)):
+                key = f'{self.ep[i]}:{self.k[i]}'
+                if key in teacher: self.tfeat[i] = teacher[key]; self.has_t[i] = 1.0
+    def __len__(self): return len(self.act)
     def __getitem__(self, i):
-        fr, bv, st, ids, act, ei, k = self.items[i]
-        x = {'front': torch.from_numpy(fr).permute(2, 0, 1).float() / 255.0,
-             'bev': torch.from_numpy(bv).unsqueeze(0).float() / 255.0,
-             'state': torch.from_numpy(st), 'ids': torch.from_numpy(ids),
-             'act': torch.from_numpy(act)}
+        x = {'front': torch.from_numpy(self.front[i]).permute(2, 0, 1).float() / 255.0,
+             'bev': torch.from_numpy(self.bev[i]).unsqueeze(0).float() / 255.0,
+             'state': torch.from_numpy(self.state[i]), 'ids': torch.from_numpy(self.ids[i]),
+             'act': torch.from_numpy(self.act[i])}
         if self.tf is not None:
-            key = f'{ei}:{k}'
-            x['tfeat'] = torch.from_numpy(self.tf[key]) if key in self.tf else torch.zeros(self.tdim)
-            x['has_t'] = torch.tensor(1.0 if key in self.tf else 0.0)
+            x['tfeat'] = torch.from_numpy(self.tfeat[i]); x['has_t'] = torch.tensor(self.has_t[i])
         return x
 
 
@@ -106,14 +133,17 @@ def main():
     ap.add_argument('--epochs', type=int, default=30); ap.add_argument('--bs', type=int, default=256)
     ap.add_argument('--lr', type=float, default=3e-4); ap.add_argument('--teacher-feats', default=None)
     ap.add_argument('--distill-w', type=float, default=0.5); ap.add_argument('--val-frac', type=float, default=0.15)
-    ap.add_argument('--workers', type=int, default=4)
+    ap.add_argument('--workers', type=int, default=3)
+    ap.add_argument('--max-episodes', type=int, default=0, help='use only the first N episodes (smoke tests)')
     a = ap.parse_args()
     root = os.path.expanduser(a.data); os.makedirs(a.out, exist_ok=True)
     info = json.load(open(os.path.join(root, 'meta/info.json')))
     tasks = {}
     for l in open(os.path.join(root, 'meta/tasks.jsonl')):
         d = json.loads(l); tasks[d['task_index']] = d['task']
-    n_ep = info['total_episodes']; rng = np.random.default_rng(0); perm = rng.permutation(n_ep)
+    n_ep = info['total_episodes'] if not a.max_episodes else min(a.max_episodes, info['total_episodes'])
+    build_cache(root, range(n_ep), workers=max(2, a.workers))
+    rng = np.random.default_rng(0); perm = rng.permutation(n_ep)
     n_val = max(1, int(n_ep * a.val_frac)); val_eps, tr_eps = sorted(perm[:n_val]), sorted(perm[n_val:])
     teacher = None; tdim = 0
     if a.teacher_feats and os.path.isfile(a.teacher_feats):
@@ -123,7 +153,7 @@ def main():
         if not teacher: teacher = None
     print(f'episodes: {len(tr_eps)} train / {len(val_eps)} val; decoding videos (cached after first run)...', flush=True)
     tr = EpisodeSet(root, tr_eps, tasks, teacher, tdim); va = EpisodeSet(root, val_eps, tasks, teacher, tdim)
-    A = np.stack([it[4] for it in tr.items]); mu, sd = A.mean(0), A.std(0) + 1e-6
+    A = tr.act; mu, sd = A.mean(0), A.std(0) + 1e-6
     np.save(os.path.join(a.out, 'action_norm.npy'), np.stack([mu, sd]))
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'{len(tr)} train steps, {len(va)} val steps | device {dev} | action mean {mu.round(3)} std {sd.round(3)}', flush=True)
@@ -167,8 +197,13 @@ def main():
         def forward(s, front, bev, state, ids): return s.m(front, bev, state, ids)[0] * sd_t + mu_t
     dummy = (torch.zeros(1, 3, *FRONT_HW, device=dev), torch.zeros(1, 1, *BEV_HW, device=dev),
              torch.zeros(1, 5, device=dev), torch.zeros(1, MAX_TOK, dtype=torch.long, device=dev))
-    torch.onnx.export(Wrap(model), dummy, os.path.join(a.out, 'student.onnx'),
-                      input_names=['front', 'bev', 'state', 'ids'], output_names=['action'], opset_version=17)
+    onnx_path = os.path.join(a.out, 'student.onnx')
+    try:                                      # legacy exporter first (no onnxscript needed), then the new one
+        torch.onnx.export(Wrap(model), dummy, onnx_path, input_names=['front', 'bev', 'state', 'ids'],
+                          output_names=['action'], opset_version=17, dynamo=False)
+    except TypeError:
+        torch.onnx.export(Wrap(model), dummy, onnx_path, input_names=['front', 'bev', 'state', 'ids'],
+                          output_names=['action'], opset_version=17)
     n_params = sum(p.numel() for p in model.parameters())
     print(f'done: best score {best:.3f}; {n_params/1e6:.2f} M params -> {a.out}/student.onnx')
 
