@@ -116,3 +116,38 @@ optimizer has slowed that corner to the creep speed rather than failing.
 Verified end to end on a synthetic photo of a hand-drawn loop: measured lane 1.00 m against
 a 1.0 m target, 21.4 m of track, simulated lap 5.4 s. The engage path itself has been
 exercised only against stubbed ROS topics; it has not yet driven the real car.
+
+## Depth fusion (Gemini 335 depth into the scan)
+
+The lidar sees one plane about 11 cm off the floor. `depth_fusion` back-projects the
+Gemini 335 depth image into `base_link`, keeps points between `z_min` and `z_max` above
+the floor, collapses them to a per-bearing minimum range, and publishes `/scan_fused`:
+the lidar scan with, inside the cameras
+
+## Depth fusion (Gemini 335 depth into the scan)
+
+The lidar sees one plane about 11 cm off the floor. `depth_fusion` back-projects the
+Gemini 335 depth image into `base_link`, keeps points between `z_min` and `z_max` above
+the floor, collapses them to a per-bearing minimum range, and publishes `/scan_fused`:
+the lidar scan with, inside the camera's field of view, the closer of lidar and depth per
+bearing. Anything that reads `/scan` can read `/scan_fused` unchanged; the pilot page
+engages `raceline_mpc` with `scan_topic:=/scan_fused` automatically when fusion is live,
+and draws the depth-only virtual scan in orange on the lidar plot.
+
+Remote mode starts depth at 640x480@15 (`DEPTH=0 ./run_remote.sh` to disable, `DEPTH_W` and
+`DEPTH_H` to shrink it if the USB-2 cable cannot carry it). The floor filter depends on the
+camera mount height and pitch (`cam_z`, `pitch_deg` in hardware.yaml, or `CAM_PITCH_DEG` for
+remote mode): if orange points appear on open floor a metre or two ahead, the pitch is off.
+Verified offline on a synthetic scene (floor, a 12 cm box, a wall): the box is absent from
+the lidar and present in the fused scan at 1.20 m. Not yet run on the car.
+
+## Recording demonstrations
+
+`episode_logger` runs with remote mode and records nothing until an episode is started from
+the panel (instruction text, REC, then stop as good or bad, or discard). Each episode is a
+directory under `~/episodes` with the colour frames at 10 Hz, per-frame snapshots of lidar,
+odometry, IMU, the Ackermann command that actually drove the car (human or policy) and the
+raw joystick axes, plus the IMU and the commands at full rate. On the laptop,
+`tools/episodes_to_lerobot.py ~/episodes --out <dataset> --only good` repackages them into a
+LeRobot v2.1 dataset with the lidar rasterised as a bird's-eye video, which is the input
+the open VLA fine-tuning scripts expect.

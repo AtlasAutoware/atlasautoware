@@ -150,3 +150,19 @@ gamepad_teleop:
     max_steer: 0.41               # rad — match drive_node max_steer
     steer_gain: 1.0               # scale 0–1 to reduce steering sensitivity
     publish_hz: 20.0
+
+depth_fusion:                   # Gemini 335 depth -> /scan_fused (see f1tenth_gym_ros/depth_fusion.py)
+  ros__parameters:
+    depth_topic: /camera/depth/image_raw
+    info_topic: /camera/depth/camera_info
+    scan_topic: /scan
+    fused_topic: /scan_fused
+    cam_x: 0.30                 # camera_link offset from base_link (matches the static TF)
+    cam_z: 0.14
+    pitch_deg: 0.0              # + = looking down; measure it, the floor filter depends on it
+    z_min: 0.03                 # height band above the floor that counts as an obstacle
+    z_max: 0.35
+    r_min: 0.2
+    r_max: 4.0
+    stride: 2                   # process every 2nd pixel (640x480 -> 77k rays, ~2 ms)
+    floor_margin: 0.02          # z_min grows by this per metre of range, absorbs pitch error

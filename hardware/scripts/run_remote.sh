@@ -32,11 +32,24 @@ trap 'echo; echo "stopping remote mode"; kill 0' INT TERM
 ros2 launch f1tenth_stack bringup_launch.py &
 sleep 4
 if [ "${1:-}" != "novideo" ]; then
+    # Depth on: the fusion node folds it into /scan_fused so the brake and planner see
+    # obstacles above/below the lidar plane. DEPTH=0 ./run_remote.sh turns it off
+    # (e.g. if the USB-2 cable cannot carry both streams; 640x480@15 should fit).
+    if [ "${DEPTH:-1}" = "1" ]; then DEPTH_ARGS="enable_depth:=true depth_width:=${DEPTH_W:-640} depth_height:=${DEPTH_H:-480} depth_fps:=15";
+    else DEPTH_ARGS="enable_depth:=false"; fi
     ros2 launch orbbec_camera gemini_330_series.launch.py \
         enable_color:=true color_width:=640 color_height:=480 color_fps:=15 \
-        enable_depth:=false enable_point_cloud:=false enable_ir:=false \
-        enable_accel:=false enable_gyro:=false log_level:=warn > /tmp/remote_camera.log 2>&1 &
+        $DEPTH_ARGS enable_point_cloud:=false enable_ir:=false \
+        enable_accel:=true enable_gyro:=true accel_rate:=200hz gyro_rate:=200hz \
+        log_level:=warn > /tmp/remote_camera.log 2>&1 &
     sleep 6
+    # IMU into ROS body axes (proprioception for the episode logger; the racing stack does the same)
+    ros2 run f1tenth_gym_ros imu_optical_to_body --ros-args -p in_topic:=/camera/gyro_accel/sample \
+        -p out_topic:=/oakd/imu -p frame_id:=camera_link > /tmp/imu_relay.log 2>&1 &
+    if [ "${DEPTH:-1}" = "1" ]; then
+        ros2 run f1tenth_gym_ros depth_fusion --ros-args -p pitch_deg:=${CAM_PITCH_DEG:-0.0} \
+            > /tmp/depth_fusion.log 2>&1 &
+    fi
 fi
 # lowbw: cellular / Tailscale — smaller video and a longer command watchdog (PILOT_TIMEOUT, s)
 if [ "${1:-}" = "lowbw" ]; then VID="-p width:=320 -p quality:=45 -p fps:=10.0"; else VID=""; fi

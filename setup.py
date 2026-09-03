@@ -45,6 +45,7 @@ setup(
             'web_pilot = f1tenth_gym_ros.web_pilot:main',
             'track_from_image = f1tenth_gym_ros.track_from_image:main',
             'episode_logger = f1tenth_gym_ros.episode_logger:main',
+            'depth_fusion = f1tenth_gym_ros.depth_fusion:main',
         ],
     },
 )

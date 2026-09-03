@@ -118,6 +118,17 @@ def generate_launch_description():
             "'", LaunchConfiguration('use_camera'), "' == 'true' and '",
             LaunchConfiguration('use_perception'), "' == 'true'"])),
     ))
+    # Depth -> /scan_fused: obstacles above/below the lidar plane (cones, ramps, low
+    # boxes) reach the brake and planner. Point raceline_mpc at scan_topic:=/scan_fused.
+    ld.add_action(Node(
+        package='f1tenth_gym_ros',
+        executable='depth_fusion',
+        name='depth_fusion',
+        parameters=[config],
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('use_camera'), "' == 'true' and '",
+            LaunchConfiguration('use_depth'), "' == 'true'"])),
+    ))
     ld.add_action(Node(
         package='f1tenth_gym_ros',
         executable='drive_node',

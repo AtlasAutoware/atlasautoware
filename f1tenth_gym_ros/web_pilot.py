@@ -265,9 +265,12 @@ function drawScan(s){
   for(const m of [1,2,4]){ctx.beginPath();ctx.arc(130,130,m*SC,0,2*Math.PI);ctx.stroke();}
   ctx.beginPath();ctx.moveTo(130,130);ctx.lineTo(130,4);ctx.stroke();       // heading
   if(!s){ctx.fillStyle='#777';ctx.fillText('no /scan',100,134);return;}
-  const mir=$('mirror').checked?-1:1; ctx.fillStyle='#4cf';
-  for(let i=0;i<s.r.length;i++){ const r=s.r[i]; if(!(r>0.05&&r<R)) continue;
-    const a=s.a0+i*s.da, x=130-mir*r*Math.sin(a)*SC, y=130-r*Math.cos(a)*SC; ctx.fillRect(x-1,y-1,2,2); }
+  const mir=$('mirror').checked?-1:1;
+  const plot=(sc,col,sz)=>{ctx.fillStyle=col;
+    for(let i=0;i<sc.r.length;i++){ const r=sc.r[i]; if(!(r>0.05&&r<R)) continue;
+      const a=sc.a0+i*sc.da, x=130-mir*r*Math.sin(a)*SC, y=130-r*Math.cos(a)*SC; ctx.fillRect(x-sz/2,y-sz/2,sz,sz); }};
+  plot(s,'#4cf',2);                                                              // lidar
+  if(s.depth){plot(s.depth,'#fa3',3); ctx.fillStyle='#fa3'; ctx.fillText('depth',4,254);}   // camera depth, in the height band
   ctx.fillStyle='#e94'; ctx.fillRect(126,126,8,8);                              // the car
 }
 setInterval(()=>fetch('/scan').then(r=>r.json()).then(drawScan).catch(()=>drawScan(null)),200);
@@ -287,8 +290,11 @@ class H(BaseHTTPRequestHandler):
         if self.path == '/status':
             self._json(status()); return
         if self.path == '/scan':
-            with S['lock']: sc = S['scan']
-            self._json(sc if sc else {}); return
+            with S['lock']:
+                sc = dict(S['scan']) if S['scan'] else {}
+                ds = S.get('dscan'); fresh = (time.time() - S['seen'].get('depth', 0)) < 1.0
+            if sc and ds and fresh: sc['depth'] = ds
+            self._json(sc); return
         if self.path == '/trim':
             with S['lock']: t = S['trim']
             self._json({'steer_trim': t}); return
@@ -353,7 +359,10 @@ class H(BaseHTTPRequestHandler):
             if not ok and not d.get('override'):
                 self._json({'error': 'preflight failed', 'checks': checks}, 409); return
             SUP.heartbeat()
-            ok, msg = SUP.engage(rl, d.get('v_scale', 0.3), odom, extra=d.get('extra') or {})
+            with S['lock']: fusion_live = (time.time() - S['seen'].get('depth', 0)) < 1.0
+            scan_topic = '/scan_fused' if fusion_live else '/scan'    # depth-augmented when available
+            ok, msg = SUP.engage(rl, d.get('v_scale', 0.3), odom, scan_topic=scan_topic,
+                                 extra=d.get('extra') or {})
             self._json(auto_status(rl) if ok else {'error': msg}, 200 if ok else 400); return
 
         # ── episode recording ───────────────────────────────────────────────────
@@ -457,6 +466,9 @@ class WebPilot(Node):
         self.create_subscription(Image, p('image_topic'), self._img, qos_profile_sensor_data)
         self.declare_parameter('scan_topic', '/scan'); self.last_scan = 0.0
         self.create_subscription(LaserScan, p('scan_topic'), self._scan, qos_profile_sensor_data)
+        # depth-derived virtual scan (depth_fusion node), overlaid on the page's lidar plot
+        self.declare_parameter('depth_scan_topic', '/scan_depth'); self.last_dscan = 0.0
+        self.create_subscription(LaserScan, p('depth_scan_topic'), self._dscan, 10)
         try:
             from vesc_msgs.msg import VescStateStamped
             self.create_subscription(VescStateStamped, '/sensors/core', self._core, 10)
@@ -520,6 +532,16 @@ class WebPilot(Node):
         k = max(1, len(m.ranges) // 360)                          # ~360 points
         rs = [round(float(r), 2) if r == r and r < 1e5 else 0.0 for r in m.ranges[::k]]
         with S['lock']: S['scan'] = {'a0': float(m.angle_min), 'da': float(m.angle_increment) * k, 'r': rs, 'rmax': float(m.range_max)}
+
+    def _dscan(self, m):
+        now = time.time()
+        if now - self.last_dscan < 0.2: return
+        self.last_dscan = now
+        k = max(1, len(m.ranges) // 360)
+        rs = [round(float(r), 2) if r == r and 0 < r < 1e5 else 0.0 for r in m.ranges[::k]]
+        with S['lock']:
+            S['dscan'] = {'a0': float(m.angle_min), 'da': float(m.angle_increment) * k, 'r': rs}
+            S['seen']['depth'] = now
 
     def _drain_udp(self):
         while True:
