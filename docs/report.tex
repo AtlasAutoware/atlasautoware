@@ -74,33 +74,34 @@ that could follow a hallway wall using a hobby ESC, a PWM breakout board and the
 DonkeyCar library, and it recommended that the next group not deviate from the
 F1TENTH bill of materials, because every substitution costs weeks.
 
-My intended contribution is a vision-language driving policy: take an open
-vision-language-action or vision-language-navigation checkpoint --- Alibaba's
-Qwen-Robot suite \cite{qwenrobot} is the current example, but the argument does not
-depend on which one --- and post-train it on data from this car so that it follows
-natural-language goals (``go to the end of the hall and stop before the door'') rather
-than a precomputed raceline. A second car, built from the same parts list, then makes
-agent-to-agent experiments possible: two vehicles sharing pose and intent over the
+What I want to build is a vision-language driving policy: take an open
+vision-language-action or vision-language-navigation checkpoint (Alibaba's
+Qwen-Robot suite \cite{qwenrobot} is the current example, though the plan works with
+any of them) and post-train it on data from this car, so that it follows
+natural-language goals like ``go to the end of the hall and stop before the door''
+instead of a precomputed raceline. A second car, built from the same parts list, then
+opens up agent-to-agent experiments: two vehicles sharing pose and intent over the
 network.
 
-That is not what most of this year was spent on, and the gap is the point of this
-report. A policy of that kind is only as good as the robot underneath it, and the robot
-I inherited could not have produced usable training data at all. It could not report how
-fast its wheels were turning, so an ``action'' recorded during a demonstration would have
-been an uncalibrated PWM pulse. It had no inertial measurement, so there was no
-proprioceptive state to condition on and no way to tell a skid from a straight line. It
-could only be driven by a human standing in the same room with a wired gamepad, which
-caps a dataset at the length of a USB cable and one operator's patience. And it existed
-as one physical artifact with its configuration living in a single laptop, so a second
-car was not a build --- it was an archaeology project.
+That is not where most of this year went, and the gap is what this report is about.
+A policy like that is only as good as the robot underneath it, and the robot I
+inherited could not have produced usable training data. It could not report how fast its
+wheels were turning, so an ``action'' recorded during a demonstration would have been an
+uncalibrated PWM pulse. It had no inertial measurement, so there was no proprioceptive
+state to condition on, and no way to tell a skid from a straight line. It could only be
+driven by a person standing next to it with a wired gamepad, which caps a dataset at the
+length of a USB cable and one operator's patience. And it was a single physical artifact
+whose configuration lived in one laptop, so a second car meant reverse-engineering the
+first.
 
-So the work reported here is architectural, and I frame it that way: each change is
-justified by what it makes possible downstream, not by the lap time it saves.
+The work in this report is therefore about the platform, and I have organized it that
+way: each change is justified by what it makes possible later, not by the lap time it
+saves.
 
 \begin{enumerate}
   \item \textbf{Actuation with feedback.} Rebuild the drivetrain around the VESC motor
         controller the previous report gave up on, so commands are currents and speeds
-        with measured consequences --- the label side of a demonstration.
+        with measured consequences. That is the label side of a demonstration.
   \item \textbf{Sensing in the policy's coordinate frame.} Bring the lidar and camera
         into ROS~2 in the shape the stack expects, including the camera's inertial unit,
         which supplies proprioception, de-skews the lidar, and feeds the traction governor.
@@ -108,15 +109,15 @@ justified by what it makes possible downstream, not by the lap time it saves.
         over its own network, so demonstrations can be collected by anyone, anywhere, with
         the same message the policy will later emit.
   \item \textbf{Reproducibility as infrastructure.} Put the configuration, firmware
-        state and scripts in the repository, so the second car is a clone rather than a
+        state and scripts in the repository, so the second car is a clone instead of a
         rebuild.
 \end{enumerate}
 
-Perception is where the two halves meet: I trained and deployed a car detector on the
-platform, which is both immediately useful for head-to-head racing and a rehearsal of the
+Perception is where the two halves meet. I trained and deployed a car detector on the
+platform, which is useful for head-to-head racing now and also a rehearsal of the
 train-offline, deploy-on-the-robot loop the pivot needs. All of it is checked into the
-team repository \cite{atlasrepo}. What has \emph{not} been done is validate the
-autonomous controller on the floor with the new drivetrain --- the competition that was
+team repository \cite{atlasrepo}. What I have \emph{not} done is validate the
+autonomous controller on the floor with the new drivetrain. The competition that was
 the deadline (Boston, September 6--7, 2026) was cancelled when most of the team
 withdrew, which is also what freed the project to pivot. The Results section separates
 what was measured from what still needs a track, and the Pivot section states what
@@ -209,15 +210,15 @@ camera, lidar and battery are all different; the chassis, Jetson and servo are t
   \label{tab:parts}
 \end{table}
 
-\section*{Stage 1: Actuation --- making the action space real}
+\section*{Stage 1: Actuation with feedback}
 
 A demonstration is a pair: what the world looked like, and what the driver did. The
 second half is worthless if ``what the driver did'' cannot be measured. The 2024 car
 commanded a hobby ESC with a unitless PWM pulse and got nothing back, so its own report
-notes that throttle could not be calibrated at all and that the same pulse produced
-different speeds on different surfaces. Any policy trained on those labels would be
-learning a mapping that does not exist. Rebuilding around the VESC is what turns the
-action space into currents and speeds with measured consequences.
+notes that throttle could not be calibrated and that the same pulse produced different
+speeds on different surfaces. A policy trained on those labels would be learning a
+mapping that does not exist. The VESC gives the action space real units: currents and
+speeds with measured consequences.
 
 \subsection*{Getting the VESC to drive the motor}
 
@@ -279,7 +280,7 @@ commands current or speed, publishes wheel-speed odometry at 20\,Hz and logs bat
 voltage, MOSFET temperature and fault codes. On the bench the VESC held commanded speeds
 of 1500, 3500, 6000 and 9000 electrical RPM to within 1\% at 1.5--3\,A.
 
-\section*{Stage 2: Sensing --- observations and proprioception}
+\section*{Stage 2: Sensing, observations and proprioception}
 
 A vision-language policy conditions on what the robot sees and, if it is to drive
 rather than sightsee, on how the robot is moving. This stage supplies both, in the
@@ -343,26 +344,25 @@ sends commands, so other viewers cannot interfere, and if nothing arrives for 25
 node publishes neutral, which releases the dead-man and stops the car; the VESC's own
 one-second timeout sits behind that.
 
-The network is a mode, not a fixed choice, because collecting varied data means driving
-in varied places: the car can be its own 5\,GHz hotspot (highest bandwidth, tens of
-metres), its own 2.4\,GHz hotspot (roughly double the range), or a client on an existing
-mesh network, in which case it roams between nodes and the usable area becomes the mesh's
-footprint. With an internet uplink --- a tethered phone or an LTE modem --- and a
-WireGuard overlay, the same page works from anywhere, at 60--150\,ms of latency and a
-reduced video setting. A steering trim (the car pulls right, and mechanical adjustment
-did not remove it) is applied on the car to every input source and persisted across
-restarts.
+The network is selectable, because collecting varied data means driving in varied places.
+The car can be its own 5\,GHz hotspot (highest bandwidth, tens of metres), its own
+2.4\,GHz hotspot (roughly double the range), or a client on an existing mesh network, in
+which case it roams between nodes and the usable area becomes the mesh's footprint. Given
+an internet uplink (a tethered phone or an LTE modem) and a WireGuard overlay, the same
+page works from anywhere, at 60--150\,ms of latency and a reduced video setting. A
+steering trim (the car pulls right, and mechanical adjustment did not remove it) is
+applied on the car to every input source and kept across restarts.
 
 Two robustness details came out of real use. The VESC's USB port re-enumerates when the
 car is knocked hard enough, and the F1TENTH VESC driver aborts when its serial port
-disappears --- leaving the web page happily up and the car deaf; the driver, the Ackermann
+disappears, which left the web page up and the car deaf; the driver, the Ackermann
 converter and the joystick node now respawn automatically. And an early version of the
-gamepad bridge published its axes with the sign convention of the SDL joystick API rather
-than that of ROS, so throttle and steering were mirrored: the same class of frame
+gamepad bridge published its axes with the SDL joystick sign convention instead of the
+ROS one, so throttle and steering came out mirrored. That is the same kind of frame
 mismatch as the camera IMU below, and a reminder that a data pipeline silently learns
 whatever convention error you leave in it.
 
-\section*{Stage 4: Perception --- and a rehearsal of the training loop}
+\section*{Stage 4: Perception, and a rehearsal of the training loop}
 
 \subsection*{Why a car detector}
 
@@ -446,20 +446,20 @@ removes a specific obstacle between this car and a learned policy.
 
 \paragraph{Actions became measurable quantities.} The 2024 build could only send a PWM
 pulse and hear nothing back. This car reports wheel speed at 20\,Hz, battery voltage and
-temperatures, and accepts current commands directly. A logged demonstration is now
-(observation, action, outcome) with all three in physical units --- and the same closed
+temperatures, and accepts current commands directly. A logged demonstration is now a
+triple of observation, action and outcome, all in physical units, and the same closed
 loop is what let the current-mode launch fix the low-speed stall.
 
-\paragraph{The camera is a motion sensor first.} The Orbbec's most valuable output is
-its 200\,Hz inertial stream: it supplies the proprioceptive state a policy conditions on,
-de-skews the lidar so scans are geometrically honest at speed, and gives the traction
-governor a yaw rate. Vision is its second job.
+\paragraph{The camera is a motion sensor first.} The Orbbec's most useful output is
+its 200\,Hz inertial stream. It supplies the proprioceptive state a policy conditions on,
+it de-skews the lidar so scans stay accurate at speed, and it gives the traction governor
+a yaw rate. Vision is its second job.
 
 \paragraph{One command channel for humans and policies.} Teleoperation, the joystick,
 the Python client and any future policy server all publish the same
-\texttt{sensor\_msgs/Joy}, behind the same watchdog. Swapping a human for a model is a
-change of sender, not a change of architecture --- and the safety envelope does not care
-which one is talking.
+\texttt{sensor\_msgs/Joy}, behind the same watchdog. Swapping a human for a model changes
+the sender, not the rest of the system, and the safety envelope does not care which one
+is talking.
 
 \paragraph{The dataset is not room-shaped.} Browser teleoperation over selectable
 network modes means demonstrations can be collected by anyone with a link, in any space
@@ -472,87 +472,85 @@ one-line diagnosis, and it makes the motor controller's state a versioned artifa
 instead of something living in one laptop's settings.
 
 \paragraph{Negatives from the deployed camera.} Public datasets tell a detector what a
-car looks like; only the target camera can tell it what the false alarms look like. Two
-minutes of recording eliminated all 21 false detections --- the smallest possible version
-of the lesson that on-robot data beats more internet data.
+car looks like. Only the target camera can tell it what the false alarms look like. Two
+minutes of recording eliminated all 21 false detections, which is the small version of a
+larger point: on-robot data beats more internet data.
 
 \paragraph{Reproducibility as a deliverable.} The \texttt{hardware/} folder holds the
 F1TENTH configuration overrides, the patch to the VESC driver, the udev rules that give
 the gamepad, lidar, VESC and camera stable names and permissions, the VESC configuration
 blobs and the tools that restore them, the network and launch scripts, and a runbook of
-the failures described above. This is what makes ``build a second car'' a parts order
-rather than a research project, and a second car is what makes agent-to-agent work
-possible at all.
+the failures above. This is what turns ``build a second car'' into a parts order, and a
+second car is what makes any agent-to-agent work possible.
 
 \section*{The Pivot: A Post-Trained Driving Policy}
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\textwidth]{pivot_pipeline.pdf}
-  \caption{The intended pipeline. The platform work described above supplies the left
-  box (data with real actions and proprioception, collected by anyone over the network),
-  and the safety and control loops in the right box that a remote policy cannot be
-  trusted to provide.}
+  \caption{The intended pipeline. The platform work above supplies the left box (data
+  with real actions and proprioception, collected by anyone over the network) and the
+  safety and control loops in the right box that a remote policy cannot be trusted to
+  provide.}
   \label{fig:pivot}
 \end{figure}
 
 \subsection*{What the policy would be}
 
 Recent robotics foundation models pair a vision-language backbone with an action head
-and are explicitly meant to be post-trained on a target platform's data. Alibaba's
-Qwen-Robot suite \cite{qwenrobot} is the current instance --- a navigation model, a
-manipulation model and a video world model, released as a stack --- and open
+and are meant to be post-trained on a target platform's data. Alibaba's
+Qwen-Robot suite \cite{qwenrobot} is the current instance, releasing a navigation model,
+a manipulation model and a video world model together, and open
 vision-language-action checkpoints such as OpenVLA \cite{openvla}, $\pi_0$
-\cite{pi0} and NVIDIA's GR00T~N1 \cite{groot} occupy the same slot. The plan does not
+\cite{pi0} and NVIDIA's GR00T~N1 \cite{groot} fill the same slot. The plan does not
 depend on the choice; it depends on the interface. All of them consume images, a
 natural-language instruction and some proprioceptive state, and emit a short chunk of
 future actions.
 
 For this car the mapping is direct: the Orbbec's colour frames and the instruction text
 are the inputs, the velocity EKF's speed and yaw rate are the proprioception, and the
-action is the pair (steering angle, speed) that the Ackermann chain already accepts. The
-lidar is the one input these models were not designed for; the cheap first approach is to
-render each scan as a small bird's-eye image and let the vision encoder see it, with a
-learned range tokenizer as the more principled second version. The training objective is
+action is the (steering angle, speed) pair the Ackermann chain already accepts. The
+lidar is the one input these models were not designed for. The cheap first approach is to
+render each scan as a small bird's-eye image and let the vision encoder see it, and the
+more principled second version is a learned range tokenizer. The training objective is
 imitation on teleoperated episodes, with the raceline MPC available as a second source of
-demonstrations that are smoother and more consistent than a human's.
+demonstrations that are smoother than a human's.
 
 \subsection*{What has to be built}
 
 Three things, none of which need new hardware. First, an \emph{episode logger}: a node
 that records synchronized camera, lidar, IMU, odometry and command streams into a
 standard imitation-learning format (LeRobot's dataset layout is the obvious target) with
-an instruction string attached per episode, plus a way to mark an episode good or bad
-without stopping. Second, a \emph{policy server}: the 2--4\,B-parameter models in this
-class will not run at a useful rate on an Orin Nano, so inference belongs on the laptop
-or a rented GPU, with the car keeping every fast loop --- watchdog, emergency braking,
-traction governance, the 50\,Hz current loop --- and treating the policy as one more
-source of \texttt{/cmd} messages, subject to the same timeout. Third, \emph{evaluation}:
-success rate on held-out instructions in the hallway, plus offline action-prediction
-error on held-out drives so the model can be compared without risking the car.
+an instruction string per episode, plus a way to mark an episode good or bad without
+stopping. Second, a \emph{policy server}. The 2--4\,B-parameter models in this class will
+not run at a useful rate on an Orin Nano, so inference belongs on the laptop or a rented
+GPU, and the car keeps every fast loop (watchdog, emergency braking, traction governance,
+the 50\,Hz current loop) and treats the policy as one more source of \texttt{/cmd}
+messages under the same timeout. Third, \emph{evaluation}: success rate on held-out
+instructions in the hallway, and offline action-prediction error on held-out drives so
+models can be compared without risking the car.
 
 \subsection*{Two cars}
 
-The second car is the part the \texttt{hardware/} folder was written for. With two
-vehicles on one network, each publishing pose, velocity and intended waypoints --- over
-ROS~2 with a Zenoh middleware, or the same small JSON messages the web pilot already
-uses --- the experiments become leader--follower, shared-goal navigation, and cooperative
-overtaking, and the interesting questions turn into how much bandwidth a useful ``intent''
-message actually needs and how gracefully behaviour degrades as the link does. The
-network work in Stage~3 is what determines how far apart the two cars can be while that
-holds, which is why it belongs in this report rather than in a footnote about
-convenience.
+The second car is what the \texttt{hardware/} folder was written for. With two vehicles
+on one network, each publishing pose, velocity and intended waypoints (over ROS~2 with a
+Zenoh middleware, or the same small JSON messages the web pilot already uses), the
+experiments become leader--follower, shared-goal navigation, and cooperative overtaking.
+The useful questions there are how much bandwidth an ``intent'' message actually needs and
+how gracefully behaviour degrades as the link gets worse. How far apart the two cars can
+be while that holds is set by the network mode from Stage~3, which is why that work sits
+in the report rather than in a footnote about convenience.
 
-\subsection*{Honest risks}
+\subsection*{Where this can go wrong}
 
-The Orin Nano cannot host these models, so the split-inference design is a constraint,
-not a preference, and it puts a network link inside the control loop --- acceptable at
-hallway speeds with a watchdog, not acceptable at racing speeds. Post-training a model of
-this size on a laptop GPU means parameter-efficient fine-tuning and a modest dataset;
-a few hundred episodes from one hallway will produce a policy that is good at that
-hallway. And every VLA result I am building on is reported by its authors on their own
-platforms, mostly manipulators; whether they transfer to a fast Ackermann vehicle with a
-20\,cm wheelbase is exactly the open question, which is the honest reason to attempt it.
+The Orin Nano cannot host these models, so split inference is forced, and it puts a
+network link inside the control loop. That is fine at hallway speeds with a watchdog and
+not fine at racing speeds. Post-training a model this size on a laptop GPU means
+parameter-efficient fine-tuning and a small dataset, so a few hundred episodes from one
+hallway will produce a policy that is good at that hallway and not obviously anywhere
+else. And every VLA result I am building on is reported by its authors on their own
+platforms, mostly manipulators. Whether any of it transfers to a fast Ackermann vehicle
+with a 20\,cm wheelbase is the open question, and the reason it is worth trying.
 
 \section*{Results}
 \label{sec:results}
@@ -593,7 +591,7 @@ which assumes a 0.30\,m car width, is unverified against a real opponent. On the
 teleoperation side, only the car's own 5\,GHz hotspot and the USB link have been driven
 through; the mesh-client, tethered and overlay-network paths are implemented and
 documented but not yet exercised, and no latency figures over cellular are claimed here.
-Nothing about the learned policy has been built --- the Pivot section is a plan, not a
+Nothing about the learned policy has been built; the Pivot section is a plan, not a
 result.
 
 \section*{Next Steps}
@@ -603,21 +601,21 @@ compare the odometry before trusting any autonomy; calibrate the servo the way t
 report did (a range finder on the front wheel) and enter the centre and limits in both
 stacks' configuration, which also removes the right-hand pull that the web trim currently
 masks; measure the wheelbase and the two sensor offsets. Install the JetPack CUDA and
-TensorRT packages when the Jetson is on a network that is not a captive portal --- the
+TensorRT packages when the Jetson is on a network that is not a captive portal; the
 perception node already prefers a TensorRT engine if one is present, and the 640-pixel
 export is in the repository for that purpose.
 
-Then the pivot, in the order the risk suggests: build the episode logger and collect a
-first dataset while driving the hallway by hand, since that is useful regardless of which
-model wins; stand up a policy server against a small checkpoint and verify the
-timing and the safety envelope with a deliberately trivial policy before a real one; only
-then post-train and evaluate. Build the second car from the \texttt{hardware/} folder in
-parallel, because it is a parts order and a weekend rather than a research risk, and
-because every agent-to-agent question needs it.
+Then the pivot, in roughly increasing order of risk. Build the episode logger and collect
+a first dataset while driving the hallway by hand, which is useful whichever model wins.
+Stand up a policy server against a small checkpoint and verify the timing and the safety
+envelope with a deliberately trivial policy before running a real one. Only then
+post-train and evaluate. Build the second car from the \texttt{hardware/} folder in
+parallel; it is a parts order and a weekend rather than a research risk, and every
+agent-to-agent question needs it.
 
 Two warnings for whoever picks this up. Keep the battery connector keyed or marked: the
 VESC dies instantly on reversed leads, and a replacement took a week to arrive. And read
-\texttt{hardware/RUNBOOK.md} before touching the VESC's application settings --- the
+\texttt{hardware/RUNBOOK.md} before touching the VESC's application settings, because the
 shared PPM/servo pin will look like a dead motor controller to anyone who does not know
 about it.
 
