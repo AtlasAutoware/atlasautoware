@@ -93,12 +93,14 @@ class VescSerialBackend:
         self.erpm_gain = float(cfg['erpm_gain'])
         # current-control (torque) parameters — mirror f1tenth_stack vesc.yaml so the
         # self-driving path launches the same way the manual joystick path does.
+        # Optional with defaults: control_mode 'speed' (the original behaviour) needs none
+        # of these, and a config written before current mode existed must still load.
         self.control_mode = str(cfg.get('control_mode', 'speed')).lower()
         self.max_speed = float(cfg['max_speed'])
-        self.max_current = float(cfg['max_current'])
-        self.min_current = float(cfg['min_current'])
-        self.brake_current = float(cfg['brake_current'])
-        self.current_deadband = float(cfg['current_deadband'])
+        self.max_current = float(cfg.get('max_current', 45.0))
+        self.min_current = float(cfg.get('min_current', 10.0))
+        self.brake_current = float(cfg.get('brake_current', 15.0))
+        self.current_deadband = float(cfg.get('current_deadband', 0.05))
         self.parser = vp.PacketParser()
 
     def _write_throttle(self, speed):
