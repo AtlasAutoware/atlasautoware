@@ -129,15 +129,27 @@ def describe_route(path, turn_thresh=math.radians(35)):
         acc = head[k] - last
         if abs(acc) > turn_thresh:
             steps.append(('left' if acc > 0 else 'right', float(L[k] / total))); last = head[k]
+    # merge runs of same-direction turns (a long curve fires the threshold repeatedly)
+    merged = []
+    for side, frac in steps:
+        if merged and merged[-1][0] == side and frac - merged[-1][2] < 0.25:
+            merged[-1][2] = frac; merged[-1][3] += 1
+        else:
+            merged.append([side, frac, frac, 1])
     parts = []
-    if not steps:
+    if not merged:
         parts.append('go straight')
+    elif len(merged) > 3:
+        left = sum(m[3] for m in merged if m[0] == 'left'); right = sum(m[3] for m in merged if m[0] == 'right')
+        dom = 'left' if left > right else 'right'
+        parts.append(f'follow the track, bearing mostly {dom}')
     else:
         pos = 0.0
-        for side, frac in steps:
-            gap = frac - pos
-            lead = 'turn ' if not parts else ('then turn ' if gap < 0.35 else 'go straight, then turn ')
-            parts.append(f'{lead}{side}'); pos = frac
+        for side, f0, f1, n in merged:
+            gap = f0 - pos
+            verb = f'follow the bend to the {side}' if n > 1 else f'turn {side}'
+            lead = '' if not parts else ('then ' if gap < 0.35 else 'go straight, then ')
+            parts.append(lead + verb); pos = f1
         if 1.0 - pos > 0.3: parts.append('then go straight')
     tail = ' to the end and stop' if total > 4.0 else ' and stop'
     s = ', '.join(parts) + tail

@@ -181,3 +181,13 @@ set) distance-to-goal and a `reached` flag — a success signal for policy evalu
 run with `-p camera:=false` for full-rate closed-loop policy eval, or run the sim on a
 desktop (with ROS 2) for faster data collection. A Qwen-Drive-style policy would attach
 here exactly like raceline_mpc — consume /scan + /camera + /odom, publish /drive.
+
+## Home router (AtlasNet), the range fix
+
+A dedicated router beats the Jetson's own hotspot for FPV range. `carnet.sh home <SSID> <password>`
+creates a NetworkManager profile with a fixed address (default 192.168.0.250), autoconnect
+priority 20 (the AtlasCar hotspot is 10), and WiFi power-save off, and tries WPA3 then WPA2.
+The car joins the router whenever it is in range and falls back to being its own AP when it is
+not, with no manual switching. Verified 3 Sept 2026: joined AtlasNet (WPA3, 2.4 GHz, -34 dBm,
+162 Mbit/s); from a laptop wired to the router the pilot page answers in about 25 ms and ping is
+about 4 ms. Pilot page: http://192.168.0.250:8080/ . Range is now the router's coverage.
