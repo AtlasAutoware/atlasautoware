@@ -72,3 +72,9 @@ Quick health check (second shell):
 - Networks: hardware/scripts/carnet.sh  hotspot | hotspot24 | client <SSID> [pw] | tether | status.
 - Anywhere/cellular: install_tailscale.sh once, then http://atlascar:8080/ with video=low and PILOT_TIMEOUT=0.6 run_remote.sh lowbw.
 - vesc_driver/ackermann_to_vesc/joy respawn after a VESC USB blip (they used to die with std::system_error).
+
+## Self-driving + track pictures from the web UI (2026-09-02)
+- Panel on the pilot page: pick a raceline, speed cap, ENGAGE. Space/Esc or STOP stops it; closing the tab stops it (2 s heartbeat).
+- Autonomy publishes /drive (mux priority 10); holding a key or LB (teleop, priority 100) always overrides.
+- joy_teleop_f310.yaml lost its deadman-less 'default' block: it streamed zero teleop that masked autonomy in the mux. web_pilot now publishes that brake-to-zero itself, and suppresses it while engaged.
+- Track picture -> map -> raceline in the same panel (see docs/REMOTE.md). Scale comes from the lane width you type in.
