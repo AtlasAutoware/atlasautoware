@@ -2,8 +2,9 @@
 #SBATCH --job-name=atlas-teacher
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:turing:2
+# gpu partition MaxMemPerNode=64000 MB; keep --mem under that
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=96G
+#SBATCH --mem=60G
 #SBATCH --time=06:00:00
 #SBATCH --output=slurm_logs/03_teacher_%j.out
 # Qwen-Drive-1.0-4B teacher: download (13.8 GB, cached on NFS) and extract vision features

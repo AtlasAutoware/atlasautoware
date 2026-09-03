@@ -3,7 +3,7 @@
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:turing:1
 #SBATCH --cpus-per-task=12
-#SBATCH --mem=48G
+#SBATCH --mem=32G
 #SBATCH --time=04:00:00
 #SBATCH --output=slurm_logs/04_student_%j.out
 # Train the small goal-conditioned student (BC on the expert + distillation from the
