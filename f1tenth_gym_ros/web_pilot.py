@@ -481,6 +481,12 @@ class WebPilot(Node):
         # episode logger (data collection for policy training): control + status over JSON strings
         self.rec_pub = self.create_publisher(String, '/episode/cmd', 10)
         self.create_subscription(String, '/episode/status', self._rec_status, 10)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(('0.0.0.0', int(p('udp_port')))); self.sock.setblocking(False)
+        srv = ThreadingHTTPServer(('0.0.0.0', int(p('http_port'))), H); srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.create_timer(1.0 / float(p('publish_hz')), self._tick)
+        self.get_logger().info(f"web pilot: http://<car-ip>:{int(p('http_port'))}/  (UDP :{int(p('udp_port'))} also accepted); watchdog {self.timeout*1000:.0f} ms")
         NODE[0] = self
 
     def _rec_status(self, m):
@@ -490,12 +496,6 @@ class WebPilot(Node):
 
     def rec_cmd(self, d):
         self.rec_pub.publish(String(data=json.dumps(d)))
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(('0.0.0.0', int(p('udp_port')))); self.sock.setblocking(False)
-        srv = ThreadingHTTPServer(('0.0.0.0', int(p('http_port'))), H); srv.daemon_threads = True
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        self.create_timer(1.0 / float(p('publish_hz')), self._tick)
-        self.get_logger().info(f"web pilot: http://<car-ip>:{int(p('http_port'))}/  (UDP :{int(p('udp_port'))} also accepted); watchdog {self.timeout*1000:.0f} ms")
 
     def _core(self, m):
         with S['lock']:
@@ -585,7 +585,9 @@ def main(args=None):
     try: rclpy.spin(n)
     except KeyboardInterrupt: pass
     SUP.stop('web_pilot shutting down')
-    n.destroy_node(); rclpy.shutdown()
+    n.destroy_node()
+    try: rclpy.shutdown()
+    except Exception: pass                    # context may already be shut down on Ctrl-C
 
 
 if __name__ == '__main__':
