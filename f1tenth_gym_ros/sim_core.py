@@ -75,11 +75,13 @@ def render_fpv(simmap, x, y, theta, w=640, h=480, fx=460.5, cx=None, max_range=1
     img[h // 2:] = (35, 35, 38)                              # floor
     wall_h = np.clip((1.2 / d) * h, 4, h).astype(int)        # nearer = taller
     shade = np.clip(230 - d / max_range * 200, 25, 230).astype(np.uint8)
-    for i in range(w):
-        top = (h - wall_h[i]) // 2; bot = top + wall_h[i]
-        c = shade[i]
-        img[top:bot, i] = (c, c, int(c * 0.85))
-    return img
+    # vectorized column fill: mask of wall cells (h,w), per-column colour (distance-shaded)
+    top = (h - wall_h) // 2
+    rows = np.arange(h)[:, None]
+    mask = (rows >= top[None, :]) & (rows < (top + wall_h)[None, :])
+    col = np.stack([shade, shade, (shade * 0.85).astype(np.uint8)], axis=1)   # (w,3)
+    img = np.where(mask[:, :, None], np.broadcast_to(col[None, :, :], (h, w, 3)), img)
+    return img.astype(np.uint8)
 
 
 def load_map(yaml_path):

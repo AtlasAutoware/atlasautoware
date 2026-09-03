@@ -40,8 +40,8 @@ class SimEnv(Node):
         super().__init__('sim_env')
         P = (('map_yaml', ''), ('start_x', 0.0), ('start_y', 0.0), ('start_theta', 0.0),
              ('goal_x', 0.0), ('goal_y', 0.0), ('goal_radius', 0.5), ('use_goal', False),
-             ('wheelbase', 0.33), ('max_steer', 0.41), ('phys_hz', 100.0),
-             ('scan_hz', 10.0), ('scan_beams', 720), ('scan_fov', 2 * math.pi),
+             ('wheelbase', 0.33), ('max_steer', 0.41), ('phys_hz', 50.0),
+             ('scan_hz', 10.0), ('scan_beams', 540), ('scan_fov', 2 * math.pi),
              ('max_range', 16.0), ('scan_noise', 0.01), ('cmd_timeout', 0.4),
              ('camera', True), ('cam_hz', 15.0), ('cam_w', 640), ('cam_h', 480), ('cam_fx', 460.5))
         for k, v in P: self.declare_parameter(k, v)
@@ -164,7 +164,7 @@ class SimEnv(Node):
 
 def main(args=None):
     rclpy.init(args=args); n = SimEnv()
-    try: rclpy.spin(n)
+    try: rclpy.spin(n)                              # single-threaded: no races; render is vectorized/cheap
     except KeyboardInterrupt: pass
     try: n.destroy_node(); rclpy.shutdown()
     except Exception: pass

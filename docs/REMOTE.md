@@ -151,3 +151,33 @@ raw joystick axes, plus the IMU and the commands at full rate. On the laptop,
 `tools/episodes_to_lerobot.py ~/episodes --out <dataset> --only good` repackages them into a
 LeRobot v2.1 dataset with the lidar rasterised as a bird's-eye video, which is the input
 the open VLA fine-tuning scripts expect.
+
+## Simulator (sim_env) — policy test bench + data collection
+
+`sim_env` is a closed-loop 1/10 simulator that speaks the car's exact interface, so the
+same nodes drive it as drive the real car:
+
+    publishes  /scan  /odom  /pf/pose/odom (ground truth)  /camera/color/image_raw (synthetic)  /sim/state
+    consumes   /teleop, /drive   (teleop wins when fresh, like the real mux)
+
+Physics is a kinematic bicycle on any occupancy map (maps/*.yaml); the lidar is ray-cast
+against the map; the camera is a distance-shaded raycast render (a placeholder, not
+photorealistic — a vision policy trained on it will have a sim-to-real gap).
+
+**Run it (no hardware, isolated on ROS_DOMAIN_ID=7):**
+
+    ./run_sim.sh maps/levine.yaml            # drive with WASD in the browser at :8080
+    # or point a policy at it:
+    ROS_DOMAIN_ID=7 ros2 run f1tenth_gym_ros raceline_mpc --ros-args \
+        -p raceline:=racelines/levine_auto.csv -p odom_topic:=/pf/pose/odom -p v_scale:=0.6
+
+**Verified:** the raceline MPC policy read the sim's /scan + /pf/pose/odom and drove the
+sim car ~29 m along a generated levine raceline (up to 4.2 m/s) in closed loop. The
+episode logger records sim drives in the car's format, so `run_sim.sh` is also a
+data-collection environment. `/sim/state` reports distance, collisions, and (with a goal
+set) distance-to-goal and a `reached` flag — a success signal for policy evaluation.
+
+**Perf note:** on the Jetson's ARM CPU the synthetic camera render caps the sim at ~5 Hz;
+run with `-p camera:=false` for full-rate closed-loop policy eval, or run the sim on a
+desktop (with ROS 2) for faster data collection. A Qwen-Drive-style policy would attach
+here exactly like raceline_mpc — consume /scan + /camera + /odom, publish /drive.
