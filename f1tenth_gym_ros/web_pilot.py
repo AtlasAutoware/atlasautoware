@@ -37,9 +37,14 @@ JOB = PA.Job()                 # track conversion / raceline optimization
 NODE = [None]                  # the running WebPilot, for handlers that need ROS
 
 
+DEFAULT_TRIM = 0.0                  # a nonzero trim biases one way and steals throw from the
+                                    # other side; correct a straight-line pull at the servo
+                                    # center (vesc.yaml offset) instead. Q/E still fine-tunes.
+
+
 def load_trim():
     try:
-        with open(TRIM_FILE) as f: return float(json.load(f).get('steer_trim', 0.0))
+        with open(TRIM_FILE) as f: return float(json.load(f).get('steer_trim', DEFAULT_TRIM))
     except (OSError, ValueError): return 0.0
 
 
@@ -168,7 +173,7 @@ function tick(){
     for(let i=0;i<Math.min(11,gp.buttons.length);i++) buttons[i]=gp.buttons[i].pressed?1:0;
     if(buttons[4]){ src='pad'; thr=-gp.axes[1]*max; str=-gp.axes[2]; axes[1]=thr; }
   }
-  const kthr=(keys.w?1:0)-(keys.s?1:0), kstr=(keys.a?1:0)-(keys.d?1:0);   // ROS: left = +1
+  const kthr=(keys.w?1:0)-(keys.s?1:0), kstr=(keys.a?1:0)-(keys.d?1:0);   // ROS: left = +1 (A=left, D=right)
   if(kthr||kstr){ src='keys';
     thr=step(kthr*max,thr,1.5*dt); str=step(kstr,str,4*dt);
     axes=[0,thr,1,str,0,1]; buttons[4]=1;
@@ -271,7 +276,27 @@ function drawScan(s){
       const a=sc.a0+i*sc.da, x=130-mir*r*Math.sin(a)*SC, y=130-r*Math.cos(a)*SC; ctx.fillRect(x-sz/2,y-sz/2,sz,sz); }};
   plot(s,'#4cf',2);                                                              // lidar
   if(s.depth){plot(s.depth,'#fa3',3); ctx.fillStyle='#fa3'; ctx.fillText('depth',4,254);}   // camera depth, in the height band
+  drawPath();                                                                    // predicted turn path
   ctx.fillStyle='#e94'; ctx.fillRect(126,126,8,8);                              // the car
+}
+// Predicted path: the Ackermann arc the car follows at the current steering command
+// (steering command + trim). Bicycle model, rear axle. Green = where you're heading.
+const WB=0.33, MAXSTEER=0.34, PATHLEN=4.0;
+function drawPath(){
+  const mir=$('mirror').checked?-1:1;
+  const eff=Math.max(-1,Math.min(1,str+trim));          // ROS: left = +
+  const d=eff*MAXSTEER;                                  // steering angle (rad)
+  ctx.strokeStyle='#5e9'; ctx.lineWidth=2; ctx.beginPath();
+  const N=40;
+  for(let k=0;k<=N;k++){ const sarc=PATHLEN*k/N; let fwd,left;
+    if(Math.abs(d)<1e-3){ fwd=sarc; left=0; }
+    else{ const Rr=WB/Math.tan(d), phi=sarc/Rr; fwd=Rr*Math.sin(phi); left=Rr*(1-Math.cos(phi)); }
+    const x=130-mir*left*SC, y=130-fwd*SC;
+    if(k===0)ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  if(Math.abs(d)>1e-3){ const Rr=Math.abs(WB/Math.tan(d));
+    ctx.fillStyle='#5e9'; ctx.fillText('R '+Rr.toFixed(1)+' m',4,14); }
 }
 setInterval(()=>fetch('/scan').then(r=>r.json()).then(drawScan).catch(()=>drawScan(null)),200);
 </script></body></html>"""
@@ -446,7 +471,11 @@ class WebPilot(Node):
         for k, v in (('http_port', 8080), ('udp_port', 5005), ('joy_topic', '/joy'), ('timeout', 0.25), ('publish_hz', 50.0),
                      ('image_topic', '/camera/color/image_raw'), ('width', 480), ('quality', 60), ('fps', 15.0), ('udp_invert_axes', True)):
             self.declare_parameter(k, v)
+        # trim is configurable so the simulator (no mechanical bias) can default to 0
+        self.declare_parameter('trim_file', TRIM_FILE)
+        self.declare_parameter('default_trim', DEFAULT_TRIM)
         p = lambda n: self.get_parameter(n).value
+        globals()['TRIM_FILE'] = str(p('trim_file')); globals()['DEFAULT_TRIM'] = float(p('default_trim'))
         self.timeout = float(p('timeout'))
         with S['lock']:
             S['video'] = {'width': int(p('width')), 'quality': int(p('quality')), 'fps': float(p('fps'))}

@@ -47,7 +47,9 @@
     position_min: 0.0
     position_max: 0.0
     servo_min: 0.15
-    servo_max: 0.85
+    servo_max: 0.90   # was 0.85; center offset 0.5304 sits right of mid, so right throw
+                      # clipped early (0.26 rad vs 0.31 left). 0.90 -> ~0.30 rad, symmetric.
+                      # Raise toward 0.91 for exact symmetry; lower if the servo binds at full right.
 
 # No longer needed, all parameters are shared
 # ackermann_to_vesc_node:

@@ -66,6 +66,9 @@ class RacelineMPC(Node):
         self.declare_parameter('raceline', '')          # explicit CSV; '' = auto-find
         self.declare_parameter('wheelbase', 0.33)
         self.declare_parameter('max_steer', 0.41)
+        self.declare_parameter('steer_offset', 0.0)    # constant steering bias (rad); 0 = none.
+                                                       # a nonzero bias steals throw on one side;
+                                                       # fix a pull at the servo center instead.
         self.declare_parameter('control_hz', 50.0)
         self.declare_parameter('v_scale', 1.0)          # global speed cap (start low!)
         self.declare_parameter('aeb_dist', 0.45)        # m, hard stop if wall/obstacle closer
@@ -85,6 +88,7 @@ class RacelineMPC(Node):
         drive_topic = self.get_parameter('drive_topic').value
         self.L          = float(self.get_parameter('wheelbase').value)
         self.max_steer  = float(self.get_parameter('max_steer').value)
+        self.steer_offset = float(self.get_parameter('steer_offset').value)
         self.v_scale    = float(self.get_parameter('v_scale').value)
         self.aeb_dist   = float(self.get_parameter('aeb_dist').value)
         self.aeb_cone   = float(self.get_parameter('aeb_cone').value)
@@ -260,7 +264,7 @@ class RacelineMPC(Node):
             v_cmd = max(v_cmd, self.min_speed)
 
         msg = AckermannDriveStamped()
-        msg.drive.steering_angle = float(np.clip(steer, -self.max_steer, self.max_steer))
+        msg.drive.steering_angle = float(np.clip(steer + self.steer_offset, -self.max_steer, self.max_steer))
         msg.drive.speed = float(v_cmd)
         self.drive_pub.publish(msg)
         self._last_cmd = (msg.drive.steering_angle, msg.drive.speed)
