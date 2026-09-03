@@ -41,6 +41,10 @@ fi
 # lowbw: cellular / Tailscale — smaller video and a longer command watchdog (PILOT_TIMEOUT, s)
 if [ "${1:-}" = "lowbw" ]; then VID="-p width:=320 -p quality:=45 -p fps:=10.0"; else VID=""; fi
 ros2 run f1tenth_gym_ros web_pilot --ros-args -p timeout:=${PILOT_TIMEOUT:-0.25} $VID &
+# demonstration recorder: idle until the page (or /episode/cmd) starts an episode
+ros2 run f1tenth_gym_ros episode_logger --ros-args -p root:=${EPISODE_ROOT:-$HOME/episodes} \
+    -p image_topic:=/camera/color/image_raw -p odom_topic:=/vesc/odom -p imu_topic:=/oakd/imu \
+    > /tmp/episode_logger.log 2>&1 &
 
 echo "──────────────────────────────────────────────────────────────"
 echo " REMOTE PILOT MODE ready.  Car IPs: $(hostname -I)"

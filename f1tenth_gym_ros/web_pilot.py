@@ -21,13 +21,17 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, Joy, LaserScan
 from nav_msgs.msg import Odometry
 from ackermann_msgs.msg import AckermannDriveStamped
-import pilot_autonomy as PA
+from std_msgs.msg import String
+try:
+    from f1tenth_gym_ros import pilot_autonomy as PA      # installed package (colcon)
+except ImportError:
+    import pilot_autonomy as PA                           # run from the source directory
 
 N_AXES, N_BUTTONS = 6, 11
 TRIM_FILE = os.path.expanduser('~/.atlascar_trim.json')   # steering trim survives restarts
 S = {'jpg': None, 'jpg_t': 0.0, 'cmd': None, 'cmd_t': 0.0, 'src': '-', 'v': None, 'rx': 0, 'scan': None,
      'trim': 0.0, 'video': {'width': 480, 'quality': 60, 'fps': 15.0},
-     'seen': {}, 'odom_topic': '/pf/pose/odom', 'lock': threading.Lock()}
+     'seen': {}, 'odom_topic': '/pf/pose/odom', 'rec': {}, 'rec_t': 0.0, 'lock': threading.Lock()}
 SUP = PA.Supervisor()          # raceline_mpc process + its stop conditions
 JOB = PA.Job()                 # track conversion / raceline optimization
 NODE = [None]                  # the running WebPilot, for handlers that need ROS
@@ -105,6 +109,18 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>AtlasCar pilo
 </div>
 <div style="font-size:11px;color:#999;margin-top:6px">Holding a key or the gamepad dead-man always
 overrides the policy (the mux gives teleop priority). Closing this tab stops the car.</div>
+
+<section>
+<h3>Record a demonstration</h3>
+<label>instruction <input id="instr" type="text" placeholder="follow the hallway to the doors and stop" style="width:290px"></label>
+<div style="margin-top:4px">
+  <button id="recstart" style="background:#622;border-color:#a44">&#9679; REC</button>
+  <button id="recgood">stop: good</button>
+  <button id="recbad">stop: bad</button>
+  <button id="recdrop" title="stop and delete">discard</button>
+</div>
+<div id="recst" style="font-size:12px;color:#9c9;margin-top:4px">logger not running</div>
+</section>
 
 <section>
 <h3>Track picture &rarr; raceline</h3>
@@ -197,7 +213,17 @@ function renderAuto(s){
   const opts=(s.racelines||[]).map(r=>`<option ${r===cur?'selected':''}>${r}</option>`).join('');
   if(sel.dataset.n!=String((s.racelines||[]).length)){sel.innerHTML=opts;sel.dataset.n=String((s.racelines||[]).length);}
   if(s.job&&s.job.log&&s.job.log.length){$('joblog').textContent=s.job.log.join('\n');$('joblog').scrollTop=1e6;}
+  const r=s.rec||{};
+  $('recst').textContent=!r.alive?'logger not running (start episode_logger)':
+    r.recording?`● REC ${r.episode_id}  ${r.frames} frames  ${r.secs}s  “${r.instruction}”`:
+    `idle · ${r.episodes||0} episodes in ${r.root||'~/episodes'}`;
+  $('recst').style.color=r.recording?'#f88':'#9c9';
 }
+function rec(path,body){fetch(path,{method:'POST',body:JSON.stringify(body)}).then(r=>r.json()).then(renderAuto);}
+$('recstart').onclick=()=>rec('/rec/start',{instruction:$('instr').value});
+$('recgood').onclick=()=>rec('/rec/stop',{label:'good'});
+$('recbad').onclick=()=>rec('/rec/stop',{label:'bad'});
+$('recdrop').onclick=()=>rec('/rec/stop',{discard:true});
 function pollAuto(){
   const q=auto?'/auto/hb':'/auto?raceline='+encodeURIComponent($('rl').value||'');
   fetch(q,{method:auto?'POST':'GET'}).then(r=>r.json()).then(renderAuto).catch(()=>{});
@@ -330,6 +356,18 @@ class H(BaseHTTPRequestHandler):
             ok, msg = SUP.engage(rl, d.get('v_scale', 0.3), odom, extra=d.get('extra') or {})
             self._json(auto_status(rl) if ok else {'error': msg}, 200 if ok else 400); return
 
+        # ── episode recording ───────────────────────────────────────────────────
+        if u.path in ('/rec/start', '/rec/stop'):
+            try: d = json.loads(body.decode() or '{}')
+            except ValueError: d = {}
+            if u.path == '/rec/start':
+                NODE[0].rec_cmd({'action': 'start', 'instruction': str(d.get('instruction', ''))[:200]})
+            else:
+                NODE[0].rec_cmd({'action': 'stop', 'label': str(d.get('label', 'unlabelled'))[:20],
+                                 'discard': bool(d.get('discard', False))})
+            time.sleep(0.15)                          # let the logger answer on /episode/status
+            self._json(auto_status()); return
+
         # ── track pictures ──────────────────────────────────────────────────────
         if u.path == '/track/upload':
             fields, filename, data = PA.parse_multipart(body, self.headers.get('Content-Type'))
@@ -387,6 +425,9 @@ def auto_status(raceline=None):
     rl = raceline or st['params'].get('raceline', '')
     ok, checks = SUP.preflight(ages(), rl, odom)
     st.update({'checks': checks, 'ready': ok, 'odom_topic': odom, 'job': JOB.status(), **PA.list_tracks()})
+    with S['lock']:
+        rec = dict(S['rec']); rec['alive'] = (time.time() - S['rec_t']) < 2.0 if S['rec_t'] else False
+    st['rec'] = rec                                   # episode logger state, if it is running
     return st
 
 
@@ -425,7 +466,18 @@ class WebPilot(Node):
         with S['lock']: S['odom_topic'] = p('odom_topic')
         self._odom_sub = None
         self._watch_odom(p('odom_topic'))
+        # episode logger (data collection for policy training): control + status over JSON strings
+        self.rec_pub = self.create_publisher(String, '/episode/cmd', 10)
+        self.create_subscription(String, '/episode/status', self._rec_status, 10)
         NODE[0] = self
+
+    def _rec_status(self, m):
+        try: d = json.loads(m.data)
+        except ValueError: return
+        with S['lock']: S['rec'], S['rec_t'] = d, time.time()
+
+    def rec_cmd(self, d):
+        self.rec_pub.publish(String(data=json.dumps(d)))
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(('0.0.0.0', int(p('udp_port')))); self.sock.setblocking(False)
         srv = ThreadingHTTPServer(('0.0.0.0', int(p('http_port'))), H); srv.daemon_threads = True

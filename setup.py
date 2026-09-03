@@ -44,6 +44,7 @@ setup(
             'mjpeg_server = f1tenth_gym_ros.mjpeg_server:main',
             'web_pilot = f1tenth_gym_ros.web_pilot:main',
             'track_from_image = f1tenth_gym_ros.track_from_image:main',
+            'episode_logger = f1tenth_gym_ros.episode_logger:main',
         ],
     },
 )
