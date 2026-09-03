@@ -7,6 +7,8 @@
 #   carnet.sh client <SSID> [password]    join an existing WiFi / mesh (eero, Orbi, Deco, ...) as a station; the car
 #                                         roams between mesh nodes, so range = the mesh's footprint. Then find the car
 #                                         with `carnet.sh status` or http://ubuntu.local:8080/ (mDNS).
+#   carnet.sh home <SSID> <password> [ip]   permanent home router for FPV range: fixed IP (default 192.168.0.250),
+#                                         autoconnect above the hotspot; falls back to being the AP out of range
 #   carnet.sh tether                      use a phone plugged in over USB as the uplink (phone: enable USB tethering),
 #                                         for the cellular/Tailscale path (see docs/REMOTE.md)
 #
@@ -59,6 +61,31 @@ case "$cmd" in
     nmcli connection modify "$ssid" 802-11-wireless.powersave 2 connection.autoconnect-priority 20 2>/dev/null || true
     iw dev "$IF" set power_save off 2>/dev/null || true
     echo "joined $ssid: car IP $(hostname -I | awk '{print $1}')  (also http://ubuntu.local:8080/ via mDNS)"
+    ;;
+  home)
+    # Permanent home network for FPV range: a dedicated router (e.g. AtlasNet). Fixed IP so the
+    # pilot page has a stable URL, autoconnect priority above the hotspot (20 > 10), so the car
+    # joins this whenever it is in range and falls back to being its own AP when it is not.
+    #   carnet.sh home <SSID> <password> [ip]        default ip 192.168.0.250 (gateway/dns = x.x.x.1)
+    need_root "$@"
+    ssid="${2:?usage: carnet.sh home <SSID> <password> [ip]}"; pw="${3:?password}"; ip="${4:-192.168.0.250}"
+    gw="${ip%.*}.1"
+    nmcli connection delete "$ssid" >/dev/null 2>&1 || true
+    join() {   # $1 = key-mgmt (sae for WPA3-Personal, wpa-psk for WPA2)
+        nmcli connection delete "$ssid" >/dev/null 2>&1 || true
+        nmcli connection add type wifi ifname "$IF" con-name "$ssid" ssid "$ssid" \
+            wifi-sec.key-mgmt "$1" wifi-sec.psk "$pw" \
+            connection.autoconnect yes connection.autoconnect-priority 20 \
+            802-11-wireless.powersave 2 \
+            ipv4.method manual ipv4.addresses "$ip/24" ipv4.gateway "$gw" ipv4.dns "$gw" >/dev/null
+        nmcli connection up "$ssid" >/dev/null 2>&1
+    }
+    if join sae; then echo "joined $ssid (WPA3)"
+    elif join wpa-psk; then echo "joined $ssid (WPA2)"
+    else echo "could not join $ssid: check the password, or set the router to WPA2/WPA3 mixed"; exit 1; fi
+    iw dev "$IF" set power_save off 2>/dev/null || true
+    echo "car = $ip  (autoconnect priority 20; AtlasCar hotspot is the fallback when out of range)"
+    echo "pilot page: http://$ip:8080/"
     ;;
   tether)
     need_root "$@"

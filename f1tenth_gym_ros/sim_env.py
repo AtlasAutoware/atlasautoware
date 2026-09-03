@@ -63,6 +63,7 @@ class SimEnv(Node):
         self.create_subscription(AckermannDriveStamped, '/teleop', self._teleop, 10)
         self.create_subscription(AckermannDriveStamped, '/drive', self._drive, 10)
         self.create_subscription(String, '/sim/reset', self._reset_cmd, 5)
+        self.create_subscription(String, '/sim/goal', self._goal_cmd, 5)
         self.scan_pub = self.create_publisher(LaserScan, '/scan', qos_profile_sensor_data)
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
         self.pf_pub = self.create_publisher(Odometry, '/pf/pose/odom', 10)
@@ -90,6 +91,15 @@ class SimEnv(Node):
         self.start = self.state[:2].copy()
         self.collisions = 0; self.dist = 0.0; self.min_goal = 1e9; self.reached = False
         self.get_logger().info('sim reset')
+
+    def _goal_cmd(self, m):
+        """{"x":..,"y":..,"radius":..} sets the goal for the success metric (or {"clear":true})."""
+        try: d = json.loads(m.data)
+        except ValueError: return
+        if d.get('clear'):
+            self.use_goal = False; self.reached = False; return
+        self.goal = np.array([float(d['x']), float(d['y'])]); self.goal_r = float(d.get('radius', self.goal_r))
+        self.use_goal = True; self.reached = False; self.min_goal = 1e9
 
     def _cmd(self):
         now = time.time()
