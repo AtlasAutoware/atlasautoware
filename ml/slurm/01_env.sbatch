@@ -9,7 +9,7 @@
 set -e
 cd "$SLURM_SUBMIT_DIR"
 VENV=$HOME/atlas_venv
-if [ ! -x "$VENV/bin/python" ]; then python3 -m venv "$VENV"; fi
+rm -rf "$VENV"; python3 -m venv "$VENV"   # always rebuild: nodes differ in python version
 source "$VENV/bin/activate"
 pip install -q --upgrade pip
 # built on the gpu partition (python 3.12); compute nodes are 3.14 with no CUDA torch wheels
