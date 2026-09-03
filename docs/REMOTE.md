@@ -191,3 +191,25 @@ The car joins the router whenever it is in range and falls back to being its own
 not, with no manual switching. Verified 3 Sept 2026: joined AtlasNet (WPA3, 2.4 GHz, -34 dBm,
 162 Mbit/s); from a laptop wired to the router the pilot page answers in about 25 ms and ping is
 about 4 ms. Pilot page: http://192.168.0.250:8080/ . Range is now the router's coverage.
+
+## Localization is on by default
+
+Self-driving cannot engage without a map-frame pose, so remote mode now starts localization
+itself. The default is SLAM, because it needs no prior map and therefore works in a room
+nobody has mapped: slam_toolbox publishes `map -> odom`, and `pose_relay` turns that into
+`/pf/pose/odom`, the topic the racing stack reads. Options:
+
+    ./run_remote.sh                      SLAM (default), builds a map as you drive
+    MAP=maps/my_track.yaml ./run_remote.sh   particle filter against a known map instead
+    LOCALIZE=off ./run_remote.sh         no localization
+
+**The odometry trap.** `vesc_to_odom` runs with `use_servo_cmd_to_calc_angular_velocity`,
+and its VESC-state callback returns early until it has received one servo command. Until
+somebody drives, it therefore publishes no odometry at all, so there is no
+`odom -> base_link` transform, and SLAM discards every scan with "queue is full" while the
+particle filter sits waiting for a motion model. This is why `/odom` looked healthy at
+37 Hz during a driving session and was silent after a reboot. Remote mode now publishes one
+neutral `/teleop` message at startup to prime it; the mux drops that after its 0.2 s
+timeout, so it cannot mask autonomy. Verified 3 Sept 2026: `/odom` 43 Hz, `/tf` carrying
+both `map->odom` and `odom->base_link`, `/pf/pose/odom` 20 Hz in the map frame, and the
+pilot page's pose preflight green without any manual step.

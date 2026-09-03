@@ -52,6 +52,38 @@ if [ "${1:-}" != "novideo" ]; then
             > /tmp/depth_fusion.log 2>&1 &
     fi
 fi
+# ── Prime the odometry ────────────────────────────────────────────────────────
+# vesc_to_odom runs with use_servo_cmd_to_calc_angular_velocity, and its VESC-state
+# callback returns early until it has seen ONE servo command. So without this, odometry
+# (and therefore the odom->base_link transform, SLAM, the particle filter and the
+# map-frame pose the racing stack needs) only starts existing after somebody drives.
+# One neutral command unblocks it for good; the mux drops it after its 0.2 s timeout, so
+# it cannot mask autonomy.
+ros2 topic pub -1 /teleop ackermann_msgs/msg/AckermannDriveStamped "{}" >/dev/null 2>&1 || true
+
+# ── Localization, on by default ───────────────────────────────────────────────
+# Something has to publish a map-frame pose or self-driving can never engage. SLAM is the
+# default because it needs no prior map, so it works in a room we have never mapped; it
+# publishes map->odom and pose_relay turns that into /pf/pose/odom, the topic the racing
+# stack reads. With a map of the space, the particle filter is cheaper and drift-free:
+#   MAP=maps/my_track.yaml ./run_remote.sh      localize against that map instead
+#   LOCALIZE=off ./run_remote.sh                no localization (manual driving only)
+if [ "${LOCALIZE:-on}" != "off" ]; then
+    if [ -n "${MAP:-}" ]; then
+        [ -f "$MAP" ] || MAP="$HOME/atlas_ws/src/atlasautoware/$MAP"
+        ros2 run f1tenth_gym_ros particle_filter --ros-args -p map_yaml:="$MAP" \
+            -p scan_topic:=/scan -p odom_topic:=/odom > /tmp/localize.log 2>&1 &
+        echo "localization: particle filter on $(basename "$MAP")"
+    else
+        SLAM_CFG="$HOME/atlas_ws/src/atlasautoware/config/slam_toolbox.yaml"
+        ros2 run slam_toolbox async_slam_toolbox_node --ros-args --params-file "$SLAM_CFG" \
+            > /tmp/slam.log 2>&1 &
+        sleep 3
+        ros2 run f1tenth_gym_ros pose_relay > /tmp/pose_relay.log 2>&1 &
+        echo "localization: SLAM (building a map as you drive) -> /pf/pose/odom"
+    fi
+fi
+
 # lowbw: cellular / Tailscale — smaller video and a longer command watchdog (PILOT_TIMEOUT, s)
 if [ "${1:-}" = "lowbw" ]; then VID="-p width:=320 -p quality:=45 -p fps:=10.0"; else VID=""; fi
 ros2 run f1tenth_gym_ros web_pilot --ros-args -p timeout:=${PILOT_TIMEOUT:-0.25} $VID &
