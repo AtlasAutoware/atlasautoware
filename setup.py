@@ -51,6 +51,7 @@ setup(
             'sim_env = f1tenth_gym_ros.sim_env:main',
             'goal_expert = f1tenth_gym_ros.goal_expert:main',
             'policy_bridge = f1tenth_gym_ros.policy_bridge:main',
+            'calibrate_steering = f1tenth_gym_ros.calibrate_steering:main',
         ],
     },
 )

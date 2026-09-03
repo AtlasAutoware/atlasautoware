@@ -213,3 +213,36 @@ neutral `/teleop` message at startup to prime it; the mux drops that after its 0
 timeout, so it cannot mask autonomy. Verified 3 Sept 2026: `/odom` 43 Hz, `/tf` carrying
 both `map->odom` and `odom->base_link`, `/pf/pose/odom` 20 Hz in the map frame, and the
 pilot page's pose preflight green without any manual step.
+
+## Fixing the steering permanently
+
+Trim works but it is the wrong home for a fix: it is applied per command by web_pilot, so a
+right command plus a left trim can never reach full right lock, and it lives outside the
+config, so autonomy and a bare manual bring-up never see it. The centre belongs in
+`steering_angle_to_servo_offset`.
+
+**Convert a trim you already dialled in.** Since `servo = gain * angle + offset`, adding a
+trim `t` to every command is identical to shifting the centre by `gain * t`:
+
+    ./bake_trim.sh --dry     # show the numbers
+    ./bake_trim.sh           # write vesc.yaml, zero the trim, rebuild, restart
+
+Applied 3 Sept 2026: trim -0.150 (= -0.0510 rad) with gain -1.2135 moved the centre
+0.5304 -> 0.5923, and the trim went back to 0 with full throw available again.
+
+**Measure it instead of feeling for it.** `calibrate_steering` drives straight at a low
+speed with zero commanded steering and reads the yaw rate; on a centred car that is zero, so
+anything else is the bias, `delta = yaw_rate * wheelbase / speed`, and the centre follows as
+`offset_true = offset - gain * delta`. It runs several passes, drops the acceleration
+transient, takes the median, brakes on the lidar, and always publishes zero speed on exit.
+
+    ros2 run f1tenth_gym_ros calibrate_steering --ros-args -p speed:=0.6 -p passes:=3
+    #   ... add -p apply:=true to write the result to vesc.yaml
+
+**The real root cause is mechanical.** A centre of 0.5923 sits well away from the middle of
+the servo range (0.525 for the current 0.15-0.90 limits), which is why the throw is now
+lopsided: about 0.364 rad of left lock against 0.254 rad of right. Software can put the car
+straight, but it cannot give back the right lock the misalignment ate. The fix that does is
+at the linkage: centre the servo horn and adjust the steering turnbuckles so the wheels
+point straight when the servo sits near 0.5, then re-run the calibration. Both sides then
+get roughly 0.31 rad and the controller's `max_steer` is honest in both directions.
