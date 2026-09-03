@@ -299,8 +299,9 @@ function drawScan(s){
 const WB=0.33, MAXSTEER=0.34, PATHLEN=4.0;
 function drawPath(){
   const mir=$('mirror').checked?-1:1;
-  const eff=Math.max(-1,Math.min(1,str+trim));          // ROS: left = +
-  const d=eff*MAXSTEER;                                  // steering angle (rad)
+  // Driver command only, WITHOUT trim: trim cancels the car's mechanical bias, so at
+  // neutral the car actually travels straight. Adding it here drew a phantom curve at rest.
+  const d=Math.max(-1,Math.min(1,str))*MAXSTEER;         // steering angle (rad)
   ctx.strokeStyle='#5e9'; ctx.lineWidth=2; ctx.beginPath();
   const N=40;
   for(let k=0;k<=N;k++){ const sarc=PATHLEN*k/N; let fwd,left;
