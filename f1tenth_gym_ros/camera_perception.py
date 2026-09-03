@@ -3,15 +3,15 @@ Camera perception — detect other cars with a trained YOLO model and feed the
 same race brain the lidar does.
 =============================================================================
 
-This runs on the **real car** (the f1tenth_gym sim has no camera).  Inference
-picks the fastest available backend at startup (`backend: auto`):
+This runs on the **real car** (the f1tenth_gym sim has no camera). The hardware
+configuration requires a device-built TensorRT engine. Frames go through the
+TensorRT 10 named-I/O API and CUDA directly; PyTorch, PyCUDA, and ONNX Runtime
+are absent from the live path. Build the engine once on the Jetson with
+``hardware/scripts/build_tensorrt_engine.sh``.
 
-  1. **TensorRT** — a `.engine` file built on the Jetson (`trtexec
-     --onnx=car_yolov8.onnx --saveEngine=car_yolov8.engine --fp16`) runs on
-     the GPU at FP16; the right way to use the Jetson for perception.
-  2. **cv2.dnn CUDA** — the ONNX through OpenCV's CUDA backend (needs the
-     Jetson's CUDA-enabled OpenCV build).
-  3. **cv2.dnn CPU** — always-works fallback; no GPU required.
+The `auto`, `onnxruntime`, `cuda`, and `cpu` backends remain available for
+development computers. Hardware uses `backend: tensorrt` so a broken GPU setup
+is visible at startup instead of silently taking a CPU core during a race.
 
 (Training happens separately — see `tools/train_car_detector.py`.  The
 control loop stays on CPU on purpose: its QP is far too small to benefit
@@ -30,6 +30,8 @@ Standalone (no ROS) test of the detector + geometry:
     from camera_perception import CarDetector, box_to_relative
 """
 
+import ctypes
+import ctypes.util
 import math
 import os
 
@@ -100,10 +102,12 @@ class CarDetector:
 
 
 class OrtDetector:
-    """YOLOv8 ONNX via onnxruntime (CPU). The Jetson's Ubuntu OpenCV 4.5.4 cannot run
-    the YOLOv8 head (DFL reshape), so this is the working non-TensorRT path there:
-    yolov8n ~130 ms/frame at 640, ~60 ms at 416 on the Orin Nano CPU (4 threads).
-    Same detect() interface and output parsing as CarDetector."""
+    """Portable YOLOv8 ONNX Runtime CPU backend for development and regression.
+
+    The Jetson's Ubuntu OpenCV 4.5.4 cannot execute this YOLOv8 head. ONNX
+    Runtime was the previous on-car workaround (~130 ms at 640, ~60 ms at 416
+    on four Orin Nano CPU threads), but hardware.yaml now requires TensorRT.
+    """
 
     backend = 'onnxruntime'
 
@@ -129,61 +133,272 @@ class OrtDetector:
         return parse_yolo_output(out, w0, h0, self.sz, self.conf, self.nms, self.car_class)
 
 
-class TRTDetector:
-    """YOLOv8 TensorRT engine on the Jetson GPU (FP16).
+class _CudaRuntime:
+    """Small CUDA Runtime wrapper so TensorRT needs no PyTorch or PyCUDA."""
 
-    Build once on the target device (TensorRT engines are not portable):
-        trtexec --onnx=car_yolov8.onnx --saveEngine=car_yolov8.engine --fp16
-    Same detect() interface and output parsing as CarDetector.
+    HOST_TO_DEVICE = 1
+    DEVICE_TO_HOST = 2
+
+    def __init__(self):
+        candidates = [ctypes.util.find_library('cudart'), 'libcudart.so',
+                      'libcudart.so.12']
+        error = None
+        for candidate in dict.fromkeys(c for c in candidates if c):
+            try:
+                self.lib = ctypes.CDLL(candidate)
+                break
+            except OSError as exc:
+                error = exc
+        else:
+            raise RuntimeError(f'CUDA runtime library not found ({error})')
+
+        void_p = ctypes.c_void_p
+        self.lib.cudaGetErrorString.argtypes = [ctypes.c_int]
+        self.lib.cudaGetErrorString.restype = ctypes.c_char_p
+        self.lib.cudaMalloc.argtypes = [
+            ctypes.POINTER(void_p), ctypes.c_size_t]
+        self.lib.cudaMalloc.restype = ctypes.c_int
+        self.lib.cudaFree.argtypes = [void_p]
+        self.lib.cudaFree.restype = ctypes.c_int
+        self.lib.cudaMemcpyAsync.argtypes = [
+            void_p, void_p, ctypes.c_size_t, ctypes.c_int, void_p]
+        self.lib.cudaMemcpyAsync.restype = ctypes.c_int
+        self.lib.cudaStreamCreate.argtypes = [ctypes.POINTER(void_p)]
+        self.lib.cudaStreamCreate.restype = ctypes.c_int
+        self.lib.cudaStreamSynchronize.argtypes = [void_p]
+        self.lib.cudaStreamSynchronize.restype = ctypes.c_int
+        self.lib.cudaStreamDestroy.argtypes = [void_p]
+        self.lib.cudaStreamDestroy.restype = ctypes.c_int
+
+    def _check(self, code, operation):
+        if code == 0:
+            return
+        detail = self.lib.cudaGetErrorString(code)
+        message = detail.decode() if detail else f'error {code}'
+        raise RuntimeError(f'{operation} failed: {message}')
+
+    def malloc(self, size):
+        pointer = ctypes.c_void_p()
+        self._check(self.lib.cudaMalloc(ctypes.byref(pointer), size),
+                    'cudaMalloc')
+        return int(pointer.value)
+
+    def free(self, pointer):
+        if pointer:
+            self._check(
+                self.lib.cudaFree(ctypes.c_void_p(pointer)), 'cudaFree')
+
+    def create_stream(self):
+        stream = ctypes.c_void_p()
+        self._check(self.lib.cudaStreamCreate(ctypes.byref(stream)),
+                    'cudaStreamCreate')
+        return int(stream.value)
+
+    def destroy_stream(self, stream):
+        if stream:
+            self._check(self.lib.cudaStreamDestroy(ctypes.c_void_p(stream)),
+                        'cudaStreamDestroy')
+
+    def copy_to_device(self, pointer, array, stream):
+        self._check(self.lib.cudaMemcpyAsync(
+            ctypes.c_void_p(pointer), ctypes.c_void_p(array.ctypes.data),
+            array.nbytes, self.HOST_TO_DEVICE, ctypes.c_void_p(stream)),
+            'host-to-device copy')
+
+    def copy_from_device(self, array, pointer, stream):
+        self._check(self.lib.cudaMemcpyAsync(
+            ctypes.c_void_p(array.ctypes.data), ctypes.c_void_p(pointer),
+            array.nbytes, self.DEVICE_TO_HOST, ctypes.c_void_p(stream)),
+            'device-to-host copy')
+
+    def synchronize(self, stream):
+        self._check(self.lib.cudaStreamSynchronize(ctypes.c_void_p(stream)),
+                    'cudaStreamSynchronize')
+
+
+def _fixed_shape(shape, label):
+    shape = tuple(int(value) for value in shape)
+    if not shape or any(value <= 0 for value in shape):
+        raise RuntimeError(f'unresolved TensorRT {label} shape: {shape}')
+    return shape
+
+
+class TRTDetector:
+    """Run a device-built YOLOv8 engine directly with TensorRT and CUDA.
+
+    TensorRT engines are not portable across JetPack/GPU versions. Build this
+    one on the car with ``hardware/scripts/build_tensorrt_engine.sh``. Runtime
+    inference reads only the serialized engine; ONNX Runtime is not involved.
     """
 
     backend = 'tensorrt'
 
     def __init__(self, engine_path, img_size=640, conf=0.35, nms=0.45,
-                 car_class=0):
-        import tensorrt as trt
-        import pycuda.driver as cuda
-        import pycuda.autoinit                          # noqa: F401 — CUDA ctx
-        self._cuda = cuda
+                 car_class=0, _trt=None, _cuda=None):
+        if cv2 is None:
+            raise RuntimeError('OpenCV needed for TensorRT preprocessing')
+        engine_path = os.path.abspath(os.path.expanduser(engine_path))
         if not os.path.exists(engine_path):
-            raise FileNotFoundError(f'engine not found: {engine_path}')
-        logger = trt.Logger(trt.Logger.WARNING)
-        with open(engine_path, 'rb') as f, trt.Runtime(logger) as rt:
-            self.engine = rt.deserialize_cuda_engine(f.read())
+            raise FileNotFoundError(
+                f'TensorRT engine not found: {engine_path}')
+
+        if _trt is None:
+            import tensorrt as trt
+        else:                                      # test seam; no GPU needed
+            trt = _trt
+        self._cuda = _cuda or _CudaRuntime()
+        self._trt = trt
+        self._logger = trt.Logger(trt.Logger.WARNING)
+        if hasattr(trt, 'init_libnvinfer_plugins'):
+            trt.init_libnvinfer_plugins(self._logger, '')
+        self._runtime = trt.Runtime(self._logger)
+        with open(engine_path, 'rb') as stream:
+            self.engine = self._runtime.deserialize_cuda_engine(stream.read())
+        if self.engine is None:
+            raise RuntimeError(
+                f'could not deserialize TensorRT engine: {engine_path}')
         self.ctx = self.engine.create_execution_context()
-        self.sz, self.conf, self.nms, self.car_class = img_size, conf, nms, car_class
-        # one input, one output binding; allocate page-locked host + device
-        self._host, self._dev, self._shapes = [], [], []
-        for i in range(self.engine.num_bindings):
-            shape = tuple(self.ctx.get_binding_shape(i))
-            n = int(np.prod(shape))
-            self._host.append(cuda.pagelocked_empty(n, np.float32))
-            self._dev.append(cuda.mem_alloc(self._host[-1].nbytes))
-            self._shapes.append(shape)
-        self.stream = cuda.Stream()
+        if self.ctx is None:
+            raise RuntimeError('could not create TensorRT execution context')
+
+        self.stream = self._cuda.create_stream()
+        self._device_allocations = []
+        self._bindings = None
+        self._api = 'v3' if hasattr(self.engine, 'num_io_tensors') else 'v2'
+        try:
+            self._input, self._output = self._allocate_io(img_size)
+            in_shape = self._input['shape']
+            if len(in_shape) != 4 or in_shape[0] != 1 or in_shape[1] != 3 \
+                    or in_shape[2] != in_shape[3]:
+                raise RuntimeError(
+                    f'expected NCHW square YOLO input, got {in_shape}')
+        except Exception:
+            self.close()
+            raise
+        self.sz = in_shape[-1]
+        self.conf, self.nms, self.car_class = conf, nms, car_class
+
+    def _buffer(self, name, shape, dtype):
+        shape = _fixed_shape(shape, name)
+        host = np.empty(shape, dtype=np.dtype(dtype))
+        device = self._cuda.malloc(host.nbytes)
+        self._device_allocations.append(device)
+        return {'name': name, 'shape': shape, 'host': host, 'device': device}
+
+    def _allocate_io(self, img_size):
+        """Allocate one-input/one-output YOLO engines for TRT 10 or TRT 8."""
+        trt = self._trt
+        if self._api == 'v3':
+            names = [self.engine.get_tensor_name(i)
+                     for i in range(self.engine.num_io_tensors)]
+            inputs = [
+                name for name in names
+                if self.engine.get_tensor_mode(name)
+                == trt.TensorIOMode.INPUT]
+            outputs = [
+                name for name in names
+                if self.engine.get_tensor_mode(name)
+                == trt.TensorIOMode.OUTPUT]
+            if len(inputs) != 1 or len(outputs) != 1:
+                raise RuntimeError(
+                    'YOLO engine must have exactly one input and one output; '
+                    f'got {inputs=} {outputs=}')
+            input_name, output_name = inputs[0], outputs[0]
+            input_shape = tuple(self.ctx.get_tensor_shape(input_name))
+            if any(int(value) < 0 for value in input_shape):
+                requested = (1, 3, int(img_size), int(img_size))
+                if not self.ctx.set_input_shape(input_name, requested):
+                    raise RuntimeError(
+                        f'cannot set TensorRT input to {requested}')
+                input_shape = tuple(self.ctx.get_tensor_shape(input_name))
+            output_shape = tuple(self.ctx.get_tensor_shape(output_name))
+            input_buffer = self._buffer(
+                input_name, input_shape,
+                trt.nptype(self.engine.get_tensor_dtype(input_name)))
+            output_buffer = self._buffer(
+                output_name, output_shape,
+                trt.nptype(self.engine.get_tensor_dtype(output_name)))
+            for buffer in (input_buffer, output_buffer):
+                if not self.ctx.set_tensor_address(
+                        buffer['name'], buffer['device']):
+                    raise RuntimeError('could not bind TensorRT tensor '
+                                       f'{buffer["name"]}')
+            return input_buffer, output_buffer
+
+        count = self.engine.num_bindings
+        input_indices = [i for i in range(count)
+                         if self.engine.binding_is_input(i)]
+        output_indices = [i for i in range(count)
+                          if not self.engine.binding_is_input(i)]
+        if len(input_indices) != 1 or len(output_indices) != 1:
+            raise RuntimeError(
+                'YOLO engine must have exactly one input and one output; '
+                f'got {input_indices=} {output_indices=}')
+        input_index, output_index = input_indices[0], output_indices[0]
+        input_shape = tuple(self.ctx.get_binding_shape(input_index))
+        if any(int(value) < 0 for value in input_shape):
+            requested = (1, 3, int(img_size), int(img_size))
+            if not self.ctx.set_binding_shape(input_index, requested):
+                raise RuntimeError(f'cannot set TensorRT input to {requested}')
+            input_shape = tuple(self.ctx.get_binding_shape(input_index))
+        input_buffer = self._buffer(
+            str(input_index), input_shape,
+            trt.nptype(self.engine.get_binding_dtype(input_index)))
+        output_buffer = self._buffer(
+            str(output_index), self.ctx.get_binding_shape(output_index),
+            trt.nptype(self.engine.get_binding_dtype(output_index)))
+        self._bindings = [0] * count
+        self._bindings[input_index] = input_buffer['device']
+        self._bindings[output_index] = output_buffer['device']
+        return input_buffer, output_buffer
 
     def detect(self, img):
+        """Return car boxes after a direct TensorRT GPU inference."""
         h0, w0 = img.shape[:2]
-        if cv2 is not None:
-            blob = cv2.dnn.blobFromImage(img, 1 / 255.0, (self.sz, self.sz),
-                                         swapRB=True, crop=False)
-        else:                                           # pragma: no cover
-            raise RuntimeError('OpenCV needed for preprocessing')
-        np.copyto(self._host[0], blob.ravel())
-        cuda = self._cuda
-        cuda.memcpy_htod_async(self._dev[0], self._host[0], self.stream)
-        self.ctx.execute_async_v2([int(d) for d in self._dev], self.stream.handle)
-        cuda.memcpy_dtoh_async(self._host[1], self._dev[1], self.stream)
-        self.stream.synchronize()
-        out = self._host[1].reshape(self._shapes[1])
-        return parse_yolo_output(out, w0, h0, self.sz, self.conf, self.nms,
-                                 self.car_class)
+        blob = cv2.dnn.blobFromImage(img, 1 / 255.0, (self.sz, self.sz),
+                                     swapRB=True, crop=False)
+        np.copyto(self._input['host'], blob,
+                  casting='unsafe' if blob.dtype != self._input['host'].dtype
+                  else 'no')
+        self._cuda.copy_to_device(self._input['device'],
+                                  self._input['host'], self.stream)
+        if self._api == 'v3':
+            ok = self.ctx.execute_async_v3(self.stream)
+        else:
+            ok = self.ctx.execute_async_v2(self._bindings, self.stream)
+        if not ok:
+            raise RuntimeError('TensorRT inference enqueue failed')
+        self._cuda.copy_from_device(self._output['host'],
+                                    self._output['device'], self.stream)
+        self._cuda.synchronize(self.stream)
+        return parse_yolo_output(self._output['host'], w0, h0, self.sz,
+                                 self.conf, self.nms, self.car_class)
+
+    def close(self):
+        cuda = getattr(self, '_cuda', None)
+        if cuda is None:
+            return
+        for pointer in reversed(getattr(self, '_device_allocations', [])):
+            try:
+                cuda.free(pointer)
+            except Exception:
+                pass
+        self._device_allocations = []
+        stream = getattr(self, 'stream', None)
+        if stream:
+            try:
+                cuda.destroy_stream(stream)
+            except Exception:
+                pass
+            self.stream = None
+
+    def __del__(self):                         # pragma: no cover - shutdown
+        self.close()
 
 
 def make_detector(model_path, backend='auto', **kw):
-    """backend: auto | tensorrt | onnxruntime | cuda | cpu.  `auto` prefers a TensorRT
-    .engine next to (or instead of) the ONNX, then onnxruntime (CPU), then cv2-CUDA,
-    then cv2-CPU (which cannot run YOLOv8 on OpenCV < 4.7)."""
+    """Build a detector, optionally selecting the fastest available backend."""
+    model_path = os.path.abspath(os.path.expanduser(model_path))
     engine = model_path if model_path.endswith(('.engine', '.trt')) \
         else os.path.splitext(model_path)[0] + '.engine'
     if backend in ('auto', 'tensorrt') and os.path.exists(engine):
@@ -200,7 +415,8 @@ def make_detector(model_path, backend='auto', **kw):
         except Exception as e:
             if backend == 'onnxruntime':
                 raise
-            print(f'[camera_perception] onnxruntime unavailable ({e}); trying cv2.dnn')
+            print('[camera_perception] onnxruntime unavailable '
+                  f'({e}); trying cv2.dnn')
     has_cuda = (cv2 is not None
                 and cv2.cuda.getCudaEnabledDeviceCount() > 0) \
         if backend == 'auto' else (backend == 'cuda')

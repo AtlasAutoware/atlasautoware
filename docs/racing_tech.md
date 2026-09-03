@@ -80,16 +80,25 @@ governor (live, IMU) and the profiler (planned, curvature) now share one
 
 ## GPU-accelerated perception (`camera_perception.py`, `oakd_camera.py`)
 
-YOLO opponent detection picks the fastest available backend at startup
-(`backend: auto` in `config/hardware.yaml`):
+The car configuration selects `backend: tensorrt` and loads
+`~/.cache/atlasautoware/car_yolov8_640.engine`. Build that target-specific
+engine on the Jetson with:
 
-1. **TensorRT (Jetson GPU, preferred)** — build the engine once on the car:
-   `trtexec --onnx=models/car_yolov8.onnx --saveEngine=models/car_yolov8.engine --fp16`
-   (engines are device-specific; rebuild after JetPack upgrades). `auto`
-   picks up the `.engine` automatically.
-2. **cv2.dnn CUDA** — the ONNX through OpenCV's CUDA FP16 target (Jetson
-   OpenCV builds ship CUDA-enabled).
-3. **CPU** — always-works fallback.
+```bash
+hardware/scripts/install_tensorrt.sh
+```
+
+The installer adds the JetPack TensorRT packages, compiles the 640-pixel
+training export at FP16, verifies that TensorRT can deserialize it, and runs
+the same end-to-end detector benchmark used by the ROS node. Live inference
+uses TensorRT's native named-tensor API and CUDA Runtime calls. It does not
+import ONNX Runtime, PyTorch, or PyCUDA. Rebuild after a JetPack/TensorRT
+upgrade because serialized engines are tied to the target stack.
+
+`backend: auto`, `onnxruntime`, `cuda`, and `cpu` remain development options.
+They are not automatic fallbacks in `config/hardware.yaml`; a missing engine
+leaves the perception node idle with an error instead of quietly moving the
+work onto the CPU.
 
 Alternatively set `yolo_blob` in the `oakd_camera` section to run the
 detector **on the camera's Myriad X VPU** (convert the ONNX with

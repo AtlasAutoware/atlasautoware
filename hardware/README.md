@@ -36,7 +36,7 @@ the car can be rebuilt from GitHub. See `RUNBOOK.md` for day-of-race commands.
   without VESC Tool (`python3 vesc/tools/vesc_mcconf3.py` decodes the motor config).
   Restore = send the blob with `COMM_SET_MCCONF`(13) / `COMM_SET_APPCONF`(16); see
   `vesc_fix_app.py` for the framing. Also keep an XML export from VESC Tool 6.06.
-* `scripts/` — the launcher scripts from `~` on the Jetson.
+* `scripts/` — launcher, network, and TensorRT install/build scripts used on the Jetson.
 * `RUNBOOK.md` — bring-up, health checks, calibration to-dos, gotchas.
 
 ## Gotchas that cost hours

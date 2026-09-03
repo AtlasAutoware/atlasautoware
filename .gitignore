@@ -133,6 +133,11 @@ dmypy.json
 # Transient runtime telemetry / live map (regenerated)
 runtime/
 
+# TensorRT engines are tied to a JetPack/TensorRT/GPU build and are generated
+# on the target by hardware/scripts/build_tensorrt_engine.sh.
+*.engine
+*.plan
+
 .claude/
 
 # colcon (this repo is built in-place on the Jetson)

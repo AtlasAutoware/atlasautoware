@@ -93,13 +93,25 @@ pip3 install depthai rplidar-roboticia smbus2 pyserial
 ros2 launch f1tenth_gym_ros car_bringup_launch.py
 ```
 
+Install and compile the optional car detector once on the Jetson, then enable
+it in bringup:
+
+```bash
+cd ~/atlas_ws/src/atlasautoware
+hardware/scripts/install_tensorrt.sh
+cd ~/atlas_ws
+colcon build --packages-select f1tenth_gym_ros
+source install/setup.bash
+ros2 launch f1tenth_gym_ros car_bringup_launch.py use_perception:=true
+```
+
 Calibration (steering trim, `erpm_gain`, speed scaling) lives in
 `config/hardware.yaml`. Wiring, VESC Tool setup, and the first-drive
 calibration order are in [docs/hardware.md](docs/hardware.md). Both actuation
 paths carry an arming hold, a command watchdog, and neutral-on-shutdown.
-YOLO opponent detection auto-selects its accelerator — TensorRT on the
-Jetson GPU, cv2-CUDA, the OAK-D's onboard VPU, or CPU fallback — see
-[docs/racing_tech.md](docs/racing_tech.md).
+YOLO opponent detection uses a device-built TensorRT engine directly on the
+Jetson GPU. The ONNX export is only an engine-build input; ONNX Runtime is not
+loaded in the car process. See [docs/camera_perception.md](docs/camera_perception.md).
 
 ## Configuration
 

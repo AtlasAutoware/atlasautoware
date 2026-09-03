@@ -92,11 +92,12 @@ camera_perception:
   ros__parameters:
     image_topic: '/oakd/rgb'
     odom_topic: '/pf/pose/odom'
-    backend: 'auto'             # auto | tensorrt | onnxruntime | cuda | cpu — auto prefers a
-                                # .engine built on the Jetson (trtexec --fp16), then
-                                # onnxruntime (CPU; what runs today), then cv2.dnn
-    img_size: 416               # models/car_yolov8.onnx is exported at 416 for the CPU path;
-                                # models/car_yolov8_640.onnx is the 640 export for TensorRT
+    # The car runs a device-built TensorRT engine directly. Keeping this explicit
+    # is intentional: a missing/broken GPU runtime must not silently consume a CPU
+    # core through ONNX Runtime during a race.
+    backend: 'tensorrt'
+    model_path: '~/.cache/atlasautoware/car_yolov8_640.engine'
+    img_size: 640               # static engine input; TRTDetector verifies this at load
     fx: 460.5                   # Orbbec Gemini 335 color @640x480 (from /oakd/camera_info)
     cx: 326.4
     car_width: 0.30             # m, F1TENTH car incl. tires; sets range from box width

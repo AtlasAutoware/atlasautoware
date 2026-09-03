@@ -106,9 +106,9 @@ def generate_launch_description():
         condition=_both('use_camera', 'oakd'),
     ))
 
-    # ── camera_perception: YOLOv8 car detector on /oakd/rgb -> /camera_opponents_poses ──
-    # (consumed by race_agent for head-to-head; raceline_mpc ignores it). Off by default:
-    # onnxruntime on the CPU costs ~60 ms/frame at 416 px. use_perception:=true to enable.
+    # YOLOv8 on /oakd/rgb -> /camera_opponents_poses. race_agent consumes it;
+    # raceline_mpc does not. use_perception:=true loads the device-built
+    # TensorRT engine from hardware.yaml.
     ld.add_action(Node(
         package='f1tenth_gym_ros',
         executable='camera_perception',
