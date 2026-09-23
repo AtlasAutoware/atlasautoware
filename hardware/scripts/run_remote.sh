@@ -26,7 +26,7 @@ pkill -f "bringup_launch.py"      >/dev/null 2>&1 || true
 # rplidar_node has to be in this list: it owns /dev/ttyUSB0 exclusively, so a survivor from
 # an earlier run makes the new one die with SL_RESULT_OPERATION_TIMEOUT and the page shows
 # "lidar /scan: no data" while everything else looks healthy.
-pkill -f "vesc_driver_node|drive_node|rplidar_node|orbbec_camera_node|component_container|remote_joy_bridge|mjpeg_server|web_pilot|depth_fusion|episode_logger|particle_filter|slam_toolbox|pose_relay" >/dev/null 2>&1 || true
+pkill -f "vesc_driver_node|drive_node|rplidar_node|orbbec_camera_node|oakd_camera|component_container|remote_joy_bridge|mjpeg_server|web_pilot|depth_fusion|episode_logger|particle_filter|slam_toolbox|pose_relay" >/dev/null 2>&1 || true
 # Killing the `ros2 launch` parent does not always take its children with it, and a surviving
 # vesc_to_odom_node keeps serving parameters from the config file it started with -- which is
 # how a corrected wheelbase and steering centre can sit in the YAML for a day without being
@@ -39,7 +39,20 @@ trap 'echo; echo "stopping remote mode"; kill 0' INT TERM
 
 ros2 launch f1tenth_stack bringup_launch.py &
 sleep 4
+# Camera: the car carries the OAK-D Pro again (the Gemini 335 is gone, 9/18), so that is
+# the default. CAMERA=orbbec ./run_remote.sh brings the Gemini path back. Every consumer
+# (web_pilot FPV, episode_logger, policy_bridge) reads $CAM_TOPIC, so nobody is left
+# subscribed to a topic that no driver publishes.
+CAMERA="${CAMERA:-oakd}"
+CFG="$HOME/atlas_ws/src/atlasautoware/config/hardware.yaml"
+if [ "$CAMERA" = "oakd" ]; then CAM_TOPIC=/oakd/rgb; else CAM_TOPIC=/camera/color/image_raw; fi
+export ATLAS_IMAGE_TOPIC="$CAM_TOPIC"
 if [ "${1:-}" != "novideo" ]; then
+  if [ "$CAMERA" = "oakd" ]; then
+    # oakd_camera publishes /oakd/rgb (bgr8), /oakd/camera_info and /oakd/imu (body axes)
+    ros2 run f1tenth_gym_ros oakd_camera --ros-args --params-file "$CFG" > /tmp/remote_camera.log 2>&1 &
+    sleep 4
+  else
     # Depth on: the fusion node folds it into /scan_fused so the brake and planner see
     # obstacles above/below the lidar plane. DEPTH=0 ./run_remote.sh turns it off
     # (e.g. if the USB-2 cable cannot carry both streams; 640x480@15 should fit).
@@ -59,6 +72,7 @@ if [ "${1:-}" != "novideo" ]; then
         ros2 run f1tenth_gym_ros depth_fusion --ros-args -p pitch_deg:=${CAM_PITCH_DEG:-0.0} \
             > /tmp/depth_fusion.log 2>&1 &
     fi
+  fi
 fi
 # ── Prime the odometry ────────────────────────────────────────────────────────
 # vesc_to_odom runs with use_servo_cmd_to_calc_angular_velocity, and its VESC-state
@@ -110,10 +124,10 @@ fi
 
 # lowbw: cellular / Tailscale — smaller video and a longer command watchdog (PILOT_TIMEOUT, s)
 if [ "${1:-}" = "lowbw" ]; then VID="-p width:=320 -p quality:=45 -p fps:=10.0"; else VID=""; fi
-ros2 run f1tenth_gym_ros web_pilot --ros-args -p timeout:=${PILOT_TIMEOUT:-0.25} $VID &
+ros2 run f1tenth_gym_ros web_pilot --ros-args -p timeout:=${PILOT_TIMEOUT:-0.25} -p image_topic:=$CAM_TOPIC $VID &
 # demonstration recorder: idle until the page (or /episode/cmd) starts an episode
 ros2 run f1tenth_gym_ros episode_logger --ros-args -p root:=${EPISODE_ROOT:-$HOME/episodes} \
-    -p image_topic:=/camera/color/image_raw -p odom_topic:=/vesc/odom -p imu_topic:=/oakd/imu \
+    -p image_topic:=$CAM_TOPIC -p odom_topic:=/vesc/odom -p imu_topic:=/oakd/imu \
     > /tmp/episode_logger.log 2>&1 &
 
 echo "──────────────────────────────────────────────────────────────"

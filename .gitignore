@@ -144,3 +144,10 @@ runtime/
 install/
 log/
 26.1.2
+
+# local experiment outputs (ml/run_experiments.sh); summaries are copied to docs/results/
+runs/
+data/
+logs/
+# TensorRT engines are device-built; rebuild with hardware/scripts/build_tensorrt_engine.sh
+*.engine

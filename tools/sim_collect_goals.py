@@ -63,7 +63,7 @@ def main():
         t = time.time()
         while time.time() - t < sec: rclpy.spin_once(n, timeout_sec=0.05)
 
-    src = 'source /opt/ros/humble/setup.bash; source ~/atlas_ws/install/setup.bash; '
+    src = f'source /opt/ros/{os.environ.get("ROS_DISTRO", "jazzy")}/setup.bash; source ~/atlas_ws/install/setup.bash; '
     logger = sh(src + f'ros2 run f1tenth_gym_ros episode_logger --ros-args -p root:={a.root} '
                       f'-p image_topic:=/camera/color/image_raw -p odom_topic:=/odom -p imu_topic:=/none '
                       f'> /tmp/sim_logger.log 2>&1')

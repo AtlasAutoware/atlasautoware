@@ -50,7 +50,18 @@ def load_episode(root, ei, cache):
             if not ok: break
             out.append(cv2.resize(f, (hw[1], hw[0]), interpolation=cv2.INTER_AREA))
         cap.release(); return np.asarray(out, np.uint8)
-    fr = frames('observation.images.front', FRONT_HW); bv = frames('observation.images.bev', BEV_HW)
+    fr = frames('observation.images.front', FRONT_HW)
+    # Rebuild the lidar raster from the raw scan in the parquet instead of decoding the mp4v
+    # video: lossy compression of one-pixel dots left only 47% of the true lidar pixels above
+    # half intensity (measured 9/23), while the car rasterises the clean scan (policy_io).
+    if 'observation.lidar' in df.columns:
+        import math, sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'f1tenth_gym_ros'))
+        from policy_io import bev_image
+        L = np.stack(df['observation.lidar'].values).astype(np.float32)
+        bv = np.stack([np.repeat(bev_image(s, -math.pi, 2 * math.pi / L.shape[1])[:, :, None], 3, 2) for s in L])
+    else:
+        bv = frames('observation.images.bev', BEV_HW)
     n = min(len(df), len(fr), len(bv))
     state = np.stack(df['observation.state'].values[:n]).astype(np.float32)
     act = np.stack(df['action'].values[:n]).astype(np.float32)
@@ -63,7 +74,7 @@ def load_episode(root, ei, cache):
 def build_cache(root, episodes, workers=8):
     """Decode all episode videos into the cache in parallel (the slow, one-time step)."""
     from multiprocessing import Pool
-    cache = os.path.join(root, '_cache')
+    cache = os.path.join(root, '_cache_v2')
     todo = [ei for ei in episodes if not os.path.isfile(os.path.join(cache, f'ep{ei:06d}.npz'))]
     if not todo: return
     print(f'caching {len(todo)} episodes with {workers} workers...', flush=True)
@@ -87,7 +98,7 @@ class EpisodeSet(Dataset):
         self.tf = teacher; self.tdim = tdim
         F, B, S, A, I, E, K = [], [], [], [], [], [], []
         for ei in episodes:
-            e = load_episode(root, ei, cache or os.path.join(root, '_cache'))
+            e = load_episode(root, ei, cache or os.path.join(root, '_cache_v2'))
             n = len(e['act']); ids = np.asarray(text_ids(tasks[int(e['task'])]), np.int64)
             F.append(e['front']); B.append(e['bev']); S.append(e['state']); A.append(e['act'])
             I.append(np.repeat(ids[None], n, 0)); E.append(np.full(n, int(ei), np.int32)); K.append(np.arange(n, dtype=np.int32))
@@ -185,10 +196,12 @@ def main():
                 pred, _ = model(b['front'], b['bev'], b['state'], b['ids'])
                 se += (pred * sd_t + mu_t - b['act']).abs().sum(0).cpu().numpy(); n += len(pred)
         mae = se / max(n, 1)
+        # the dataset's action is (speed, steer) (EpisodeWriter.set_action): index 0 is SPEED.
+        # Before 9/23 these two labels, and the weights in `score`, were swapped.
         rec = {'epoch': ep, 'train_loss': tl / max(nb, 1), 'distill': td / max(nb, 1),
-               'val_mae_steer_rad': float(mae[0]), 'val_mae_speed_mps': float(mae[1]), 'secs': round(time.time() - t0, 1)}
+               'val_mae_speed_mps': float(mae[0]), 'val_mae_steer_rad': float(mae[1]), 'secs': round(time.time() - t0, 1)}
         print(json.dumps(rec), flush=True); log.write(json.dumps(rec) + '\n'); log.flush()
-        score = mae[0] / 0.4 + mae[1] / 1.5
+        score = mae[1] / 0.4 + mae[0] / 1.5
         if score < best:
             best = score; torch.save(model.state_dict(), os.path.join(a.out, 'best.pt'))
     model.load_state_dict(torch.load(os.path.join(a.out, 'best.pt'), map_location=dev)); model.eval()

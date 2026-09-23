@@ -14,7 +14,7 @@ policy, and the speed is clamped to `max_speed`.
 
 Instruction can also be changed live on /policy/instruction (std_msgs/String).
 """
-import hashlib, json, math, os, time
+import json, math, os, time
 import numpy as np, cv2
 import rclpy
 from rclpy.node import Node
@@ -24,33 +24,19 @@ from nav_msgs.msg import Odometry
 from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import String
 
-FRONT_HW, BEV_HW, MAX_TOK, BEV_EXTENT = (96, 128), (96, 96), 24, 6.0
-
-
-def text_ids(s, n=4096, max_tok=MAX_TOK):           # keep identical to ml/train_student.py
-    toks = ''.join(c if c.isalnum() else ' ' for c in s.lower()).split()[:max_tok]
-    ids = [1 + int(hashlib.md5(t.encode()).hexdigest(), 16) % (n - 1) for t in toks]
-    return ids + [0] * (max_tok - len(ids))
-
-
-def bev_image(ranges, angle_min, angle_inc, size=BEV_HW[0], extent=BEV_EXTENT):  # same as episodes_to_lerobot
-    img = np.zeros((size, size), np.uint8)
-    r = np.asarray(ranges, np.float32); n = len(r)
-    ang = angle_min + angle_inc * np.arange(n)
-    ok = np.isfinite(r) & (r > 0.05) & (r < extent)
-    x, y = r[ok] * np.cos(ang[ok]), r[ok] * np.sin(ang[ok])
-    px = (size / 2 - x / extent * size / 2).astype(int); py = (size / 2 - y / extent * size / 2).astype(int)
-    m = (px >= 0) & (px < size) & (py >= 0) & (py < size)
-    img[px[m], py[m]] = 255
-    img[size // 2 - 1:size // 2 + 2, size // 2 - 1:size // 2 + 2] = 128
-    return img
+try:                                                 # installed package
+    from f1tenth_gym_ros.policy_io import (text_ids, bev_image, front_image, make_feed,
+                                           action_order_of, split_action, front_clear)
+except ImportError:                                  # run from a source checkout
+    from policy_io import (text_ids, bev_image, front_image, make_feed,
+                           action_order_of, split_action, front_clear)
 
 
 class PolicyBridge(Node):
     def __init__(self):
         super().__init__('policy_bridge')
         P = (('model', 'models/student.onnx'), ('instruction', 'go straight to the end and stop'),
-             ('image_topic', '/camera/color/image_raw'), ('scan_topic', '/scan'), ('odom_topic', '/odom'),
+             ('image_topic', '/oakd/rgb'), ('scan_topic', '/scan'), ('odom_topic', '/odom'),
              ('imu_topic', '/oakd/imu'), ('drive_topic', '/drive'), ('rate', 10.0), ('max_speed', 1.0),
              ('max_steer', 0.4), ('aeb_dist', 0.35), ('stale', 0.5), ('threads', 4))
         for k, v in P: self.declare_parameter(k, v)
@@ -67,6 +53,9 @@ class PolicyBridge(Node):
         so = ort.SessionOptions(); so.intra_op_num_threads = int(self.p['threads'])
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         self.sess = ort.InferenceSession(path, so, providers=['CPUExecutionProvider'])
+        # The output order comes from the model (metadata written by ml/train_policy.py; older
+        # exports are (speed, steer)). Unpacking it as (steer, speed) was the 9/23 bug.
+        self.order = action_order_of(self.sess)
         self.ids = np.asarray([text_ids(self.p['instruction'])], np.int64)
         self.front = None; self.scan = None; self.state = np.zeros(5, np.float32)
         self.t_img = self.t_scan = 0.0; self.front_clear = 99.0; self.n = 0; self.t0 = time.time()
@@ -85,13 +74,11 @@ class PolicyBridge(Node):
         if m.encoding not in ('rgb8', 'bgr8'): return
         a = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, 3)
         if m.encoding == 'rgb8': a = a[:, :, ::-1]                   # training frames were BGR (cv2)
-        self.front = cv2.resize(a, (FRONT_HW[1], FRONT_HW[0]), interpolation=cv2.INTER_AREA); self.t_img = time.time()
+        self.front = front_image(a); self.t_img = time.time()
 
     def _scan(self, m):
         self.scan = (m.ranges, m.angle_min, m.angle_increment); self.t_scan = time.time()
-        n = len(m.ranges); c = n // 2 if m.angle_min < -1.0 else 0; w = max(1, int(0.2 / max(m.angle_increment, 1e-6)))
-        seg = np.asarray(m.ranges[max(0, c - w):c + w], np.float32); seg = seg[np.isfinite(seg) & (seg > 0.05)]
-        self.front_clear = float(seg.min()) if seg.size else 99.0
+        self.front_clear = front_clear(m.ranges, m.angle_min, m.angle_increment)
 
     def _odom(self, m): self.state[0] = m.twist.twist.linear.x; self.state[1] = m.twist.twist.angular.z
     def _imu(self, m): self.state[2:5] = (m.angular_velocity.x, m.angular_velocity.y, m.angular_velocity.z)
@@ -105,10 +92,10 @@ class PolicyBridge(Node):
         if fresh:
             bev = bev_image(*self.scan)
             # channel order matches training: frames were cached from cv2 (BGR), fed unflipped
-            feed = {'front': (self.front.transpose(2, 0, 1)[None] / 255.0).astype(np.float32),
-                    'bev': (bev[None, None] / 255.0).astype(np.float32),
-                    'state': self.state[None].astype(np.float32), 'ids': self.ids}
-            steer, speed = [float(v) for v in self.sess.run(['action'], feed)[0][0]]
+            speed, steer = split_action(self.sess.run(['action'], make_feed(self.front, bev, self.state, self.ids))[0][0],
+                                        self.order)
+            # before the clamp: min()/max() silently turn a NaN into a limit (full lock)
+            if not (math.isfinite(speed) and math.isfinite(steer)): speed, steer = 0.0, 0.0; st['nan'] = True
             steer = max(-self.p['max_steer'], min(self.p['max_steer'], steer))
             speed = max(0.0, min(self.p['max_speed'], speed))
             if self.front_clear < self.p['aeb_dist']: speed = 0.0; st['aeb'] = True

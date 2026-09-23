@@ -175,7 +175,8 @@ class Supervisor:
         cmd = ['ros2', 'run', 'f1tenth_gym_ros', 'policy_bridge', '--ros-args',
                '-p', f'model:={path}', '-p', f'instruction:={instruction}',
                '-p', f'max_speed:={max_speed}', '-p', f'scan_topic:={scan_topic}',
-               '-p', f'odom_topic:={odom_topic}', '-p', 'drive_topic:=/drive']
+               '-p', f'odom_topic:={odom_topic}', '-p', 'drive_topic:=/drive',
+               '-p', f"image_topic:={os.environ.get('ATLAS_IMAGE_TOPIC', '/oakd/rgb')}"]
         return self._launch(cmd, {'mode': 'policy', 'instruction': instruction, 'max_speed': max_speed,
                                   'model': os.path.basename(path)}, env)
 

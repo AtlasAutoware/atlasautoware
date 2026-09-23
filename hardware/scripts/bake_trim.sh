@@ -47,7 +47,7 @@ cp "$V" "$V.bak.$(date +%s)"
 sed -i "s/^\( *steering_angle_to_servo_offset:\) *[-0-9.]*/\1 $NEW_OFFSET/" "$V"
 echo '{"steer_trim": 0.0}' > "$T"
 grep -E "steering_angle_to_servo_offset" "$V"
-cd "$HOME/f1tenth_ws" && source /opt/ros/humble/setup.bash && \
+cd "$HOME/f1tenth_ws" && source /opt/ros/${ROS_DISTRO:-jazzy}/setup.bash && \
     colcon build --packages-select f1tenth_stack 2>&1 | grep -E "Finished|failed"
 bash "$HOME/restart_remote.sh"
 echo "done — drive it: it should track straight with trim at 0. If it still pulls, re-trim with Q/E and run this again."
