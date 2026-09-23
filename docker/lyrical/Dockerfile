@@ -14,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 ROS_DISTRO=lyrica
 RUN apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release locales \
         python3 python3-pip python3-venv python3-numpy python3-scipy python3-yaml \
-        python3-opencv python3-pil python3-pytest python3-serial \
+        python3-opencv python3-pil python3-pytest python3-serial python3-transforms3d \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
         -o /usr/share/keyrings/ros-archive-keyring.gpg \
@@ -26,6 +26,6 @@ RUN apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false upd
         ros-lyrical-ament-index-python python3-colcon-common-extensions python3-rosdep \
     && rm -rf /var/lib/apt/lists/*
 # onnxruntime for policy_bridge (CPU; the student is ~1 M params, 1-2 ms on the Orin CPU)
-RUN pip3 install --break-system-packages --no-cache-dir onnxruntime || echo "onnxruntime wheel unavailable for this Python"
+RUN pip3 install --break-system-packages --no-cache-dir onnxruntime osqp || echo "a wheel is unavailable for this Python"
 RUN echo 'source /opt/ros/lyrical/setup.bash' >> /root/.bashrc
 WORKDIR /ws

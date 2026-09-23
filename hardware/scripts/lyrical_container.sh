@@ -31,7 +31,7 @@ for m in pkgutil.iter_modules(p.__path__):
 print(f"imported {len(ok)} modules under Lyrical; failed {len(bad)}")
 for b in bad: print("  FAIL", *b)
 EOF
-      cd /ws/src/atlasautoware && python3 -m pytest -q tests 2>&1 | tail -5' ;;
+      cd /ws/src/atlasautoware && python3 -m pytest -q -rfE -p no:cacheprovider tests 2>&1 | grep -E "^(FAILED|ERROR)|passed|failed" | cut -c1-160' ;;
   shell)
     docker run --rm -it --network host --ipc host --runtime nvidia --privileged -v /dev:/dev \
       -v "$REPO:/ws/src/atlasautoware" "$IMG" bash ;;
