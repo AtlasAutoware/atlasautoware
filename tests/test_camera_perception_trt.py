@@ -5,6 +5,7 @@ import sys
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), 'f1tenth_gym_ros'))
@@ -123,6 +124,7 @@ def fake_trt(cuda):
     ), context
 
 
+@pytest.mark.skipif(cp.cv2 is None, reason="OpenCV not installed; TRTDetector preprocessing needs it")
 def test_tensorrt_10_named_io_and_direct_inference(tmp_path):
     engine_path = tmp_path / 'car.engine'
     engine_path.write_bytes(b'fake-engine')

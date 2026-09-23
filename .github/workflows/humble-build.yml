@@ -38,7 +38,7 @@ jobs:
 
       - name: Unit tests (pure-logic suite, Python 3.10)
         run: |
-          pip3 install numpy scipy osqp pillow pytest
+          pip3 install numpy scipy osqp pillow pytest "opencv-python-headless==4.10.0.84"
           python3 -m pytest src/f1tenth_gym_ros/tests -q
 
       - name: Sim dependency install (f1tenth_gym on Python 3.10)
