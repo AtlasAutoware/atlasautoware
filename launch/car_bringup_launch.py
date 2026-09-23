@@ -12,7 +12,7 @@
 # node indexes into (+ mounting offset, + EKF de-skew) and republishes /scan.
 # lidar_driver:=pip keeps the old direct-serial path for A1/A2/A3 units.
 #
-# Camera backends (camera_backend:=orbbec|oakd, default orbbec — that is what is
+# Camera backends (camera_backend:=oakd|orbbec, default oakd — the OAK-D Pro is what is
 # on the car). The Orbbec path runs the official orbbec_camera driver
 # (gemini_330_series.launch.py) and remaps its topics onto the /oakd/* names the
 # rest of the stack was written against, so velocity_ekf / raceline_mpc /
@@ -70,7 +70,7 @@ def generate_launch_description():
                          ('lidar_driver', 'sdk'),        # sdk (C1/S-series) | pip (A1/A2/A3)
                          ('lidar_port', '/dev/sensors/rplidar'),
                          ('lidar_baud', '460800'),        # C1 = 460800
-                         ('camera_backend', 'orbbec'),   # orbbec | oakd
+                         ('camera_backend', 'oakd'),     # oakd (on the car since 9/18) | orbbec
                          ('use_depth', 'false'),         # orbbec depth + pointcloud
                          ('use_perception', 'false'),    # YOLO car detector -> /camera_opponents_poses
                          ('avoid_opponents', 'true')):   # multi-car avoidance in raceline_mpc

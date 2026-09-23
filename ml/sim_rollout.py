@@ -36,6 +36,7 @@ PARA = [lambda s: s,
         lambda s: s + '. Avoid the walls.']            # identical to tools/sim_generate.py
 
 WHEELBASE, MAX_STEER, BEAMS, CAM = 0.33, 0.4, 540, (640, 480, 460.5)
+SCAN_MAX = PIO.BEV_EXTENT + 1.0
 GOAL_TOL = 0.5          # m: "reached"
 STOP_V = 0.25           # m/s: "stopped" once inside GOAL_TOL
 _MAPS = {}
@@ -120,8 +121,9 @@ def rollout(task, policy, beta=0.0, record=False, seed=0, perturb=None, dt=0.02,
     while t < timeout:
         if t >= next_tick - 1e-9:
             next_tick += 1.0 / sensor_hz
-            scan = sm.raycast(st[0], st[1], st[2] + angles, 16.0)
-            scan = np.clip(scan + rng.normal(0, 0.01, BEAMS), 0, 16.0).astype(np.float32)
+            # 7 m is enough: the policy only sees the scan through the 6 m BEV raster
+            scan = sm.raycast(st[0], st[1], st[2] + angles, SCAN_MAX)
+            scan = np.clip(scan + rng.normal(0, 0.01, BEAMS), 0, SCAN_MAX).astype(np.float32)
             rgb = render_fpv(sm, st[0], st[1], st[2], CAM[0], CAM[1], CAM[2])
             front = PIO.front_image(np.ascontiguousarray(rgb[:, :, ::-1]))   # the car feeds BGR
             if perturb: front, scan = perturb_obs(front, scan, perturb, rng)

@@ -112,7 +112,9 @@ fi
 # Measured 4.3 ms a frame against roughly 130 ms for the same model on the CPU, which is the
 # difference between keeping up with the 15 Hz camera and not.
 if [ "${DETECT:-0}" = "1" ]; then
-    ENGINE="${ENGINE:-$HOME/atlas_ws/src/atlasautoware/models/car_yolov8_640_fp16.engine}"
+    # build_tensorrt_engine.sh writes here (the old default, models/car_yolov8_640_fp16.engine,
+    # was never produced by anything, so DETECT=1 always printed "no engine" and skipped)
+    ENGINE="${ENGINE:-${XDG_CACHE_HOME:-$HOME/.cache}/atlasautoware/car_yolov8_640.engine}"
     if [ -f "$ENGINE" ]; then
         ros2 run f1tenth_gym_ros camera_perception --ros-args -p backend:=tensorrt \
             -p model_path:="$ENGINE" > /tmp/camera_perception.log 2>&1 &

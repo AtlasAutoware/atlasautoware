@@ -73,10 +73,11 @@ velocity_ekf:
     out_topic: '/ekf/odom'
     l_r: 0.17145                # m, CG to rear axle
 
-# Camera on the car is an Orbbec Gemini 335 (camera_backend:=orbbec, the default).
+# Camera on the car is the Luxonis OAK-D Pro (camera_backend:=oakd, the default since 9/23);
+# the Orbbec Gemini 335 path (camera_backend:=orbbec) is kept for when a Gemini is fitted.
 # Its driver is launched + remapped in launch/car_bringup_launch.py (official
 # orbbec_camera node: 640x480@30 color, accel+gyro 200 Hz synced, depth off unless
-# use_depth:=true). The oakd_camera params below only apply to camera_backend:=oakd.
+# use_depth:=true) -- that paragraph describes the Orbbec path. The oakd_camera params below are the default path.
 oakd_camera:
   ros__parameters:
     width: 640

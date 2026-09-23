@@ -40,6 +40,7 @@ def test_optional_camera_package_is_not_resolved_during_construction(monkeypatch
             ['LaunchConfiguration', 'PathJoinSubstitution', 'PythonExpression'], Action),
         'launch_ros': {},
         'launch_ros.actions': dict.fromkeys(['Node', 'SetRemap'], Action),
+        'launch_ros.parameter_descriptions': {'ParameterValue': Action},
         'launch_ros.substitutions': {'FindPackageShare': FindPackageShare},
         'ament_index_python': {},
         'ament_index_python.packages': {'get_package_share_directory': lookup},
