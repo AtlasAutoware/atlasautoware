@@ -1,0 +1,289 @@
+{
+ "baseline/none": {
+  "label": "Pre-9/23 student (BC, video data)",
+  "perturb": "none",
+  "seeds": 1,
+  "episodes": 150,
+  "success": {
+   "mean": 0.006666666666666667,
+   "seed_sd": 0.0,
+   "ci": [
+    0.0,
+    0.02
+   ],
+   "per_seed": [
+    0.0067
+   ]
+  },
+  "collided": {
+   "mean": 0.8266666666666667,
+   "seed_sd": 0.0,
+   "ci": [
+    0.7666666666666667,
+    0.8866666666666667
+   ],
+   "per_seed": [
+    0.8267
+   ]
+  },
+  "progress": {
+   "mean": 0.35286198596868995,
+   "seed_sd": 0.0,
+   "ci": [
+    0.30934515474599206,
+    0.4020283657218801
+   ],
+   "per_seed": [
+    0.3529
+   ]
+  },
+  "unseen_map_success": 0.0,
+  "unseen_map_progress": 0.2963908748888244
+ },
+ "baseline/lidar": {
+  "label": "Pre-9/23 student (BC, video data)",
+  "perturb": "lidar",
+  "seeds": 1,
+  "episodes": 150,
+  "success": {
+   "mean": 0.006666666666666667,
+   "seed_sd": 0.0,
+   "ci": [
+    0.0,
+    0.02
+   ],
+   "per_seed": [
+    0.0067
+   ]
+  },
+  "collided": {
+   "mean": 0.82,
+   "seed_sd": 0.0,
+   "ci": [
+    0.76,
+    0.88
+   ],
+   "per_seed": [
+    0.82
+   ]
+  },
+  "progress": {
+   "mean": 0.3526063395529466,
+   "seed_sd": 0.0,
+   "ci": [
+    0.310186036102957,
+    0.3995153699363235
+   ],
+   "per_seed": [
+    0.3526
+   ]
+  },
+  "unseen_map_success": 0.0,
+  "unseen_map_progress": 0.3024230270124081
+ },
+ "baseline/camera": {
+  "label": "Pre-9/23 student (BC, video data)",
+  "perturb": "camera",
+  "seeds": 1,
+  "episodes": 150,
+  "success": {
+   "mean": 0.0,
+   "seed_sd": 0.0,
+   "ci": [
+    0.0,
+    0.0
+   ],
+   "per_seed": [
+    0.0
+   ]
+  },
+  "collided": {
+   "mean": 0.7066666666666667,
+   "seed_sd": 0.0,
+   "ci": [
+    0.6333333333333333,
+    0.78
+   ],
+   "per_seed": [
+    0.7067
+   ]
+  },
+  "progress": {
+   "mean": 0.32420178786143516,
+   "seed_sd": 0.0,
+   "ci": [
+    0.28422940985494993,
+    0.36749280701212306
+   ],
+   "per_seed": [
+    0.3242
+   ]
+  },
+  "unseen_map_success": 0.0,
+  "unseen_map_progress": 0.2896348096750713
+ },
+ "baseline/nocam": {
+  "label": "Pre-9/23 student (BC, video data)",
+  "perturb": "nocam",
+  "seeds": 1,
+  "episodes": 150,
+  "success": {
+   "mean": 0.0,
+   "seed_sd": 0.0,
+   "ci": [
+    0.0,
+    0.0
+   ],
+   "per_seed": [
+    0.0
+   ]
+  },
+  "collided": {
+   "mean": 0.49333333333333335,
+   "seed_sd": 0.0,
+   "ci": [
+    0.41333333333333333,
+    0.5733333333333334
+   ],
+   "per_seed": [
+    0.4933
+   ]
+  },
+  "progress": {
+   "mean": 0.20052011152397825,
+   "seed_sd": 0.0,
+   "ci": [
+    0.17108196072802906,
+    0.23406353896329787
+   ],
+   "per_seed": [
+    0.2005
+   ]
+  },
+  "unseen_map_success": 0.0,
+  "unseen_map_progress": 0.22005805981132312
+ },
+ "bc_noaug/none": {
+  "label": "BC, clean data",
+  "perturb": "none",
+  "seeds": 1,
+  "episodes": 150,
+  "success": {
+   "mean": 0.06,
+   "seed_sd": 0.0,
+   "ci": [
+    0.02666666666666667,
+    0.1
+   ],
+   "per_seed": [
+    0.06
+   ]
+  },
+  "collided": {
+   "mean": 0.7466666666666667,
+   "seed_sd": 0.0,
+   "ci": [
+    0.68,
+    0.8133333333333334
+   ],
+   "per_seed": [
+    0.7467
+   ]
+  },
+  "progress": {
+   "mean": 0.6288366247413562,
+   "seed_sd": 0.0,
+   "ci": [
+    0.5777067044747954,
+    0.6801840478265747
+   ],
+   "per_seed": [
+    0.6288
+   ]
+  },
+  "unseen_map_success": 0.06666666666666667,
+  "unseen_map_progress": 0.5242434689388559
+ },
+ "bc_aug/none": {
+  "label": "BC + augmentation",
+  "perturb": "none",
+  "seeds": 1,
+  "episodes": 150,
+  "success": {
+   "mean": 0.03333333333333333,
+   "seed_sd": 0.0,
+   "ci": [
+    0.006666666666666667,
+    0.06666666666666667
+   ],
+   "per_seed": [
+    0.0333
+   ]
+  },
+  "collided": {
+   "mean": 0.8266666666666667,
+   "seed_sd": 0.0,
+   "ci": [
+    0.7665000000000001,
+    0.88
+   ],
+   "per_seed": [
+    0.8267
+   ]
+  },
+  "progress": {
+   "mean": 0.6553530635508757,
+   "seed_sd": 0.0,
+   "ci": [
+    0.6019366322044463,
+    0.7053430583001059
+   ],
+   "per_seed": [
+    0.6554
+   ]
+  },
+  "unseen_map_success": 0.0,
+  "unseen_map_progress": 0.5336046052549791
+ },
+ "bc_aug/nocam": {
+  "label": "BC + augmentation",
+  "perturb": "nocam",
+  "seeds": 1,
+  "episodes": 150,
+  "success": {
+   "mean": 0.03333333333333333,
+   "seed_sd": 0.0,
+   "ci": [
+    0.013333333333333334,
+    0.06666666666666667
+   ],
+   "per_seed": [
+    0.0333
+   ]
+  },
+  "collided": {
+   "mean": 0.8466666666666667,
+   "seed_sd": 0.0,
+   "ci": [
+    0.7866666666666666,
+    0.9
+   ],
+   "per_seed": [
+    0.8467
+   ]
+  },
+  "progress": {
+   "mean": 0.6259489760472499,
+   "seed_sd": 0.0,
+   "ci": [
+    0.5729717001833239,
+    0.6783200890414044
+   ],
+   "per_seed": [
+    0.6259
+   ]
+  },
+  "unseen_map_success": 0.0,
+  "unseen_map_progress": 0.507659811458422
+ }
+}

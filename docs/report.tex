@@ -1,5 +1,5 @@
 %%-------------------------------------------------------
-%% AtlasAutoware: hardware bring-up report
+%% AtlasAutoware: real-time on-vehicle neural network inference (Senior Research report)
 %% Same skeleton as the Senior Research Report template
 %% (12pt article, biblatex/biber, listings).
 %%-------------------------------------------------------
@@ -58,8 +58,8 @@
 \lstset{style=mystyle}
 \graphicspath{{figures/}}
 
-\title{From a Wall-Following Car to a Data-Producing Robot:\\
-Rebuilding a 1/10-Scale Platform as Substrate for a Learned Driving Policy}
+\title{AtlasAutoware: Real-Time On-Vehicle Neural Network Inference\\
+for Autonomous 1/10-Scale Racing}
 \author{Eshan Iyer}
 \date{\today}
 
@@ -148,7 +148,7 @@ benchmark), a Model- and Acceleration-based Pursuit fallback, minimum-curvature 
 refinement, a friction-limited velocity profile, an IMU-based traction governor,
 actuation-latency compensation and a Frenet-frame overtaking planner. Those results
 were obtained in the simulator against a kinematic bicycle plant. The hardware layer in
-that paper assumed an OAK-D Pro camera; ours is an Orbbec.
+that paper assumed an OAK-D Pro camera, which is again what the car carries.
 
 MuSHR \cite{mushr} is the other common open racecar design and uses the same VESC
 interface, which is one reason to adopt it: any VESC-based stack becomes usable on this
@@ -188,8 +188,10 @@ camera, lidar and battery are all different; the chassis, Jetson and servo are t
     \toprule
     Part & Notes \\
     \midrule
-    NVIDIA Jetson Orin Nano & JetPack 6 (L4T R36.5), Ubuntu 22.04, ROS~2 Humble. Reached from
-      the laptop over the USB-C gadget network at 192.168.55.1. \\
+    NVIDIA Jetson Orin Nano Super & JetPack 7.2.1 (L4T R39.2.1), Ubuntu 24.04, ROS~2 Jazzy,
+      CUDA 13.2, TensorRT 10.16, 25\,W power mode. Reached from the laptop over the USB-C
+      gadget network at 192.168.55.1. An Ubuntu 26.04 / ROS~2 Lyrical container runs beside it
+      (Section~\ref{sec:lyrical}). \\
     Flipsky FSESC 6.7 Pro & VESC firmware 6.06 on the HW~60 profile. Replaced once after
       reversed battery leads destroyed the first board (the VESC has no reverse-polarity
       protection). \\
@@ -200,8 +202,9 @@ camera, lidar and battery are all different; the chassis, Jetson and servo are t
     Hitec D625MW & Steering servo on the VESC's servo header. \\
     Slamtec RPLIDAR C1 & 2-D lidar, 360\textdegree{}, 10\,Hz, 16\,m, 460\,800 baud over a
       CP210x serial adapter \cite{rplidarc1}. \\
-    Orbbec Gemini 335 & RGB-D camera with a 200\,Hz accelerometer and gyroscope
-      \cite{gemini335}; used here for colour and the IMU, depth off. \\
+    Luxonis OAK-D Pro & RGB camera (640$\times$360 preview) with a 200\,Hz IMU, through DepthAI~2.33.
+      An Orbbec Gemini 335 \cite{gemini335} was used in early September and is kept as a launch
+      option. \\
     Logitech F310 & Wired gamepad, XInput mode. \\
     4S LiPo, 9000\,mAh, XT90 & 16.4\,V measured. The VESC's 5\,V BEC powers the servo. \\
     \bottomrule

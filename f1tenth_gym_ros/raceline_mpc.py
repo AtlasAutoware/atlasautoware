@@ -475,12 +475,19 @@ class RacelineMPC(Node):
 def main(args=None):
     rclpy.init(args=args)
     try:
+        from rclpy.executors import ExternalShutdownException
+    except ImportError:                      # older rclpy
+        ExternalShutdownException = KeyboardInterrupt
+    try:
         node = RacelineMPC()
         rclpy.spin(node)
-    except (FileNotFoundError, KeyboardInterrupt):
+    # SIGTERM from the pilot page's STOP / the launch system arrives as
+    # ExternalShutdownException; it used to escape as a traceback on every stop
+    except (FileNotFoundError, KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

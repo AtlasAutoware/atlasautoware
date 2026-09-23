@@ -89,9 +89,20 @@ def main():
     ap.add_argument('--beam-drop', type=float, default=0.3); ap.add_argument('--val-frac', type=float, default=0.1)
     ap.add_argument('--init', default=None, help='warm start from a best.pt')
     ap.add_argument('--max-files', type=int, default=0)
+    ap.add_argument('--state-mask', default='0,0,0,0,0',
+                    help='per-dim multiplier on (vx, wz, gx, gy, gz), baked into the exported model. '
+                         'Default zeros: with its own speed as an input the clone copies it '
+                         '(v=0 -> speed 0) and never leaves the start line (the "inertia" problem)')
+    ap.add_argument('--keep-stops', action='store_true',
+                    help='keep the expert\'s at-goal stop frames. Off by default: where the goal is '
+                         'is not in the observation, so these frames teach "stop" at arbitrary places')
     a = ap.parse_args()
     torch.manual_seed(a.seed); np.random.seed(a.seed); os.makedirs(a.out, exist_ok=True)
     D, grp, nf = load_shards(a.data, a.max_files)
+    if not a.keep_stops:
+        keep = D['act'][:, 0] > 0.0                    # expert speed is exactly 0 only once done
+        print(f'dropping {int((~keep).sum())} at-goal stop frames', flush=True)
+        D = {k: v[keep] for k, v in D.items()}; grp = grp[keep]
     ug = np.unique(grp); rng = np.random.default_rng(12345)       # split fixed across seeds
     val_g = set(rng.choice(ug, max(1, int(len(ug) * a.val_frac)), replace=False).tolist())
     vm = np.array([g in val_g for g in grp]); tr_idx, va_idx = np.where(~vm)[0], np.where(vm)[0]
@@ -106,6 +117,10 @@ def main():
     del D
     mu_t, sd_t = torch.tensor(mu, device=dev), torch.tensor(sd, device=dev)
     raster = BEVRaster().to(dev); model = Student(0).to(dev)
+    mask = torch.tensor([float(x) for x in a.state_mask.split(',')], device=dev)
+    model.register_buffer('state_mask', mask)
+    _fwd = model.forward
+    model.forward = lambda front, bev, state, ids: _fwd(front, bev, state * model.state_mask, ids)
     if a.init: model.load_state_dict(torch.load(a.init, map_location=dev))
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     steps = a.epochs * (len(tr_idx) // a.bs)
@@ -166,7 +181,7 @@ def export(model, weights, mu, sd, path, cfg):
 
     class Wrap(nn.Module):
         def __init__(s, m): super().__init__(); s.m = m
-        def forward(s, front, bev, state, ids): return s.m(front, bev, state, ids)[0] * sd_t + mu_t
+        def forward(s, front, bev, state, ids): return s.m(front, bev, state, ids)[0] * sd_t + mu_t   # s.m.forward applies state_mask
     dummy = (torch.zeros(1, 3, *PIO.FRONT_HW), torch.zeros(1, 1, *PIO.BEV_HW), torch.zeros(1, 5),
              torch.zeros(1, PIO.MAX_TOK, dtype=torch.long))
     torch.onnx.export(Wrap(model), dummy, path, input_names=['front', 'bev', 'state', 'ids'],

@@ -1,0 +1,8 @@
+method | perturb | seeds | eps | success % (95% CI) | collision % | progress % | unseen-map success %
+Pre-9/23 student (BC, video data) | none | 1 | 150 | 0.7 (0.0-2.0) | 82.7 | 35.3 | 0.0
+Pre-9/23 student (BC, video data) | lidar | 1 | 150 | 0.7 (0.0-2.0) | 82.0 | 35.3 | 0.0
+Pre-9/23 student (BC, video data) | camera | 1 | 150 | 0.0 (0.0-0.0) | 70.7 | 32.4 | 0.0
+Pre-9/23 student (BC, video data) | nocam | 1 | 150 | 0.0 (0.0-0.0) | 49.3 | 20.1 | 0.0
+BC, clean data | none | 1 | 150 | 6.0 (2.7-10.0) | 74.7 | 62.9 | 6.7
+BC + augmentation | none | 1 | 150 | 3.3 (0.7-6.7) | 82.7 | 65.5 | 0.0
+BC + augmentation | nocam | 1 | 150 | 3.3 (1.3-6.7) | 84.7 | 62.6 | 0.0

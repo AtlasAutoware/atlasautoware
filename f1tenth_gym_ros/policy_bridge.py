@@ -110,9 +110,19 @@ class PolicyBridge(Node):
 
 
 def main(args=None):
+    try:
+        from rclpy.executors import ExternalShutdownException
+    except ImportError:
+        ExternalShutdownException = KeyboardInterrupt
     rclpy.init(args=args); n = PolicyBridge()
     try: rclpy.spin(n)
-    except KeyboardInterrupt: pass
+    except (KeyboardInterrupt, ExternalShutdownException): pass
+    finally:
+        # leave the actuator an explicit zero instead of the last policy command; drive_node's
+        # own timeout is the backstop, this just makes a stop immediate
+        try:
+            if rclpy.ok(): n.drive_pub.publish(AckermannDriveStamped())
+        except Exception: pass
     try: n.destroy_node(); rclpy.shutdown()
     except Exception: pass
 
