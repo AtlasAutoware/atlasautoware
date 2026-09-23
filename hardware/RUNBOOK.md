@@ -54,9 +54,20 @@ Quick health check (second shell):
   for faster laps (20000 = ~5.6 m/s), rebuild, test on a stand first.
 
 ## Camera perception (2026-09-02)
-- YOLOv8n car detector: models/car_yolov8.onnx (416, CPU/onnxruntime 17 fps) + _640 for TensorRT later.
-- Enable with use_perception:=true; feeds /camera_opponents_poses to race_agent only.
-- pip3 --user onnxruntime on the Jetson; if it installs NumPy 2, pip3 uninstall numpy (system 1.21 must win).
+- YOLOv8n car detector runs directly through TensorRT/CUDA at 640 pixels. The
+  ONNX file is used once to compile the device-specific engine; live inference
+  does not load ONNX Runtime.
+- First install/build: `cd ~/atlas_ws/src/atlasautoware && hardware/scripts/install_tensorrt.sh`.
+  Re-run `hardware/scripts/build_tensorrt_engine.sh` after a model or JetPack update.
+- Engine: `~/.cache/atlasautoware/car_yolov8_640.engine` (never copy an x86 or another Jetson's engine).
+- Rebuild the ROS package after pulling the TensorRT code:
+  `cd ~/atlas_ws && colcon build --packages-select f1tenth_gym_ros && source install/setup.bash`.
+- Enable with `use_perception:=true`; feeds `/camera_opponents_poses` to `race_agent` only.
+- Standalone check: `python3 tools/benchmark_camera_perception.py ~/.cache/atlasautoware/car_yolov8_640.engine`.
+- Safe ROS check (no drive node and no autonomous controller):
+  `ros2 launch f1tenth_gym_ros car_bringup_launch.py use_drive:=false use_racing:=false use_lidar:=false use_perception:=true`.
+  The log must say `backend: tensorrt`; verify `/oakd/rgb` and `/camera_opponents_poses`
+  are publishing. Run `tegrastats` in another shell to observe GPU activity.
 
 ## Remote pilot mode (2026-09-02)
 - The car is its own hotspot: SSID AtlasCar (NetworkManager connection, autoconnect, 5 GHz ch 36), car = 10.42.0.1.
@@ -66,3 +77,15 @@ Quick health check (second shell):
   gamepad via the browser (hold LB), lidar plot. Release everything = neutral; 250 ms watchdog on the car.
 - Only the tab that is driving sends commands; other tabs are viewers. Python client: tools/remote_pilot.py (UDP 5005).
 - Never pkill by a pattern that appears in your own command line (it kills the shell); use the scripts.
+
+## Range, trim, robustness (2026-09-02, later)
+- Steering trim: Q/E on the web page (stored on the car in ~/.atlascar_trim.json); for autonomy apply the equivalent to vesc.yaml steering_angle_to_servo_offset (see docs/REMOTE.md).
+- Networks: hardware/scripts/carnet.sh  hotspot | hotspot24 | client <SSID> [pw] | tether | status.
+- Anywhere/cellular: install_tailscale.sh once, then http://atlascar:8080/ with video=low and PILOT_TIMEOUT=0.6 run_remote.sh lowbw.
+- vesc_driver/ackermann_to_vesc/joy respawn after a VESC USB blip (they used to die with std::system_error).
+
+## Self-driving + track pictures from the web UI (2026-09-02)
+- Panel on the pilot page: pick a raceline, speed cap, ENGAGE. Space/Esc or STOP stops it; closing the tab stops it (2 s heartbeat).
+- Autonomy publishes /drive (mux priority 10); holding a key or LB (teleop, priority 100) always overrides.
+- joy_teleop_f310.yaml lost its deadman-less 'default' block: it streamed zero teleop that masked autonomy in the mux. web_pilot now publishes that brake-to-zero itself, and suppresses it while engaged.
+- Track picture -> map -> raceline in the same panel (see docs/REMOTE.md). Scale comes from the lane width you type in.

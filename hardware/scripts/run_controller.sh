@@ -14,7 +14,7 @@
 #   ./run_controller.sh ps5        # force PS5 profile
 # ─────────────────────────────────────────────────────────────────────────────
 # NOTE: no `set -u` — ROS setup.bash references unset vars (AMENT_TRACE_SETUP_FILES)
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source "$HOME/f1tenth_ws/install/setup.bash"
 
 # The self-driving stack talks to the same VESC over the same UART — make sure

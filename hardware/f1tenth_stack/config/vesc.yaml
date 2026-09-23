@@ -11,7 +11,7 @@
 
     # servo value (0 to 1) =  steering_angle_to_servo_gain * steering angle (radians) + steering_angle_to_servo_offset
     steering_angle_to_servo_gain: -1.2135
-    steering_angle_to_servo_offset: 0.5304
+    steering_angle_to_servo_offset: 0.5923
 
     # --- motor command mode (ackermann_to_vesc) ---
     # "erpm"    : closed-loop SPEED with a floor (min_erpm..max_erpm). Any throttle spins the
@@ -47,7 +47,9 @@
     position_min: 0.0
     position_max: 0.0
     servo_min: 0.15
-    servo_max: 0.85
+    servo_max: 0.90   # was 0.85; center offset 0.5304 sits right of mid, so right throw
+                      # clipped early (0.26 rad vs 0.31 left). 0.90 -> ~0.30 rad, symmetric.
+                      # Raise toward 0.91 for exact symmetry; lower if the servo binds at full right.
 
 # No longer needed, all parameters are shared
 # ackermann_to_vesc_node:
@@ -55,13 +57,24 @@
 
 vesc_to_odom_node:
   ros__parameters:
+    # Odometry speed sign. vesc_to_odom converts (erpm - offset) / gain, and the driver
+    # pinned here (vesc 5b2bd1b, via f1tenth_system foxy-devel) negates the raw erpm first.
+    # Upstream commit 1bc8251 on the humble branch removes that negation, so the same
+    # hardware reports the opposite sign after the JetPack 7 / Jazzy rebuild. Overriding the
+    # gain here and not in the shared block keeps the fix on odometry only: ackermann_to_vesc
+    # keeps the positive gain, so motor commands are untouched either way.
+    #   vesc <= 5b2bd1b (driver negates):   3575.0
+    #   vesc >= 1bc8251 (driver does not): -3575.0
+    # Confirm with tools/check_odom_sign.py, which reads back-driven erpm while you push the
+    # car forward by hand. Forward travel must give a positive /odom twist.linear.x.
+    speed_to_erpm_gain: -3575.0
     odom_frame: odom
     base_frame: base_link
     # publish odom to base link tf
     publish_tf: true
     use_servo_cmd_to_calc_angular_velocity: true
-    # car wheelbase is about 25cm
-    wheelbase: .25
+    # Traxxas Slash 4x4 wheelbase: 12.75 in = 0.324 m (the 0.25 here was wrong and biased odometry)
+    wheelbase: 0.324
 
 # No longer needed, all parameters are shared
 # vesc_driver:

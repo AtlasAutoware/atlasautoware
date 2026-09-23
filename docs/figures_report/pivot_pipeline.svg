@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="470" viewBox="0 0 1000 470" font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#333" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect width="1000" height="470" fill="#fff"/>
+<style>
+.t{font-size:15px;font-weight:700;fill:#111}.h{font-size:13px;font-weight:700;fill:#333}.s{font-size:12px;fill:#333}.k{font-size:11.5px;fill:#555;font-family:Menlo,Consolas,monospace}
+.car{fill:#EBF6EE;stroke:#3F8F4E}.gpu{fill:#F3EEFB;stroke:#7A4FB5}.dep{fill:#FFF3E0;stroke:#C77D1F}.lnk{fill:#EAF1FB;stroke:#3B6FB6}
+.ln{fill:none;stroke:#333;stroke-width:1.4}
+</style>
+
+<!-- 1. data collection on the car -->
+<g><rect class="car" x="20" y="20" width="300" height="230" rx="10" stroke-width="1.2"/>
+<text class="t" x="34" y="46">1 · Collect on the car</text>
+<text class="s" x="34" y="70">Human drives via the web pilot (any device)</text>
+<text class="s" x="34" y="88">or the autonomy stack drives itself.</text>
+<text class="h" x="34" y="114">Episode logger records, time-stamped:</text>
+<text class="k" x="34" y="132">/oakd/rgb  30 Hz   /oakd/imu  200 Hz</text>
+<text class="k" x="34" y="148">/scan  10 Hz       /vesc/odom  20 Hz</text>
+<text class="k" x="34" y="164">/joy or /drive     (the action)</text>
+<text class="k" x="34" y="180">instruction text   (the goal)</text>
+<text class="s" x="34" y="206">→ LeRobot-format dataset per episode</text>
+<text class="s" x="34" y="224">synced to the laptop over WiFi / USB</text>
+<text class="s" x="34" y="242">Fleet: a second car built from hardware/</text></g>
+
+<!-- 2. post-training -->
+<g><rect class="gpu" x="350" y="20" width="300" height="230" rx="10" stroke-width="1.2"/>
+<text class="t" x="364" y="46">2 · Post-train on a GPU</text>
+<text class="s" x="364" y="70">Backbone: an open VLA / VLN checkpoint</text>
+<text class="s" x="364" y="88">(Qwen-RobotNav, OpenVLA, π0, GR00T N1)</text>
+<text class="h" x="364" y="114">Inputs</text>
+<text class="s" x="364" y="132">RGB frame(s) · instruction · proprioception</text>
+<text class="s" x="364" y="150">lidar as a BEV image (first) or a learned</text>
+<text class="s" x="364" y="168">1-D range tokenizer (later)</text>
+<text class="h" x="364" y="194">Output: action chunk (steer, speed) @10 Hz</text>
+<text class="s" x="364" y="214">LoRA on the laptop RTX 5070 (4-bit) or</text>
+<text class="s" x="364" y="232">a rented GPU; validate offline on held-out drives</text></g>
+
+<!-- 3. deployment -->
+<g><rect class="dep" x="680" y="20" width="300" height="230" rx="10" stroke-width="1.2"/>
+<text class="t" x="694" y="46">3 · Deploy: split inference</text>
+<text class="s" x="694" y="70">Policy server on the laptop / cloud GPU</text>
+<text class="s" x="694" y="88">(the Orin Nano cannot run a 2–4 B model</text>
+<text class="s" x="694" y="106">at a useful rate)</text>
+<text class="h" x="694" y="132">Car keeps the fast loops</text>
+<text class="s" x="694" y="150">watchdog · AEB · traction governor ·</text>
+<text class="s" x="694" y="168">velocity EKF · VESC current control @50 Hz</text>
+<text class="h" x="694" y="194">Link</text>
+<text class="s" x="694" y="212">hotspot / mesh / Tailscale over cellular;</text>
+<text class="s" x="694" y="230">actions arrive on the same /cmd channel</text></g>
+
+<path class="ln" d="M320 135 H350" marker-end="url(#a)"/><path class="ln" d="M650 135 H680" marker-end="url(#a)"/>
+
+<!-- bottom: two cars + link -->
+<g><rect class="lnk" x="20" y="290" width="440" height="150" rx="10" stroke-width="1.2"/>
+<text class="t" x="34" y="316">Agent-to-agent (two cars)</text>
+<text class="s" x="34" y="340">Each car publishes pose, velocity, intent (next waypoints)</text>
+<text class="s" x="34" y="358">over the shared network: ROS 2 via rmw_zenoh, or the</text>
+<text class="s" x="34" y="376">same small UDP/JSON messages the web pilot uses.</text>
+<text class="s" x="34" y="400">Experiments: leader–follower, shared goals, cooperative</text>
+<text class="s" x="34" y="418">overtaking. Range = the network mode (carnet.sh).</text></g>
+<g><rect class="lnk" x="540" y="290" width="440" height="150" rx="10" stroke-width="1.2"/>
+<text class="t" x="554" y="316">Why the architecture work mattered</text>
+<text class="s" x="554" y="340">Closed-loop VESC → actions and speeds are real numbers,</text>
+<text class="s" x="554" y="358">not PWM guesses. IMU + EKF → proprioception. Web pilot →</text>
+<text class="s" x="554" y="376">demonstrations from anyone, and the action channel the</text>
+<text class="s" x="554" y="394">policy server uses. hardware/ → the second car is a clone.</text>
+<text class="s" x="554" y="418">Network modes → fleet range beyond one room.</text></g>
+<path class="ln" d="M170 290 V250" marker-end="url(#a)"/><path class="ln" d="M830 290 V250" marker-end="url(#a)"/>
+</svg>

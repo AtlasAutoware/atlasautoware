@@ -14,11 +14,13 @@
 #   ./run_selfdrive.sh use_camera:=false   # pass any launch arg through
 # ─────────────────────────────────────────────────────────────────────────────
 # NOTE: no `set -u` — ROS setup.bash references unset vars (AMENT_TRACE_SETUP_FILES)
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
+source "$HOME/f1tenth_ws/install/setup.bash"   # rplidar_ros SDK driver (RPLIDAR C1)
 source "$HOME/atlas_ws/install/setup.bash"
 
 # The manual stack talks to the same VESC over the same UART — free the port.
 pkill -f vesc_driver_node     >/dev/null 2>&1 || true
+pkill -f "rplidar_ros"        >/dev/null 2>&1 || true   # SDK driver from the manual stack
 pkill -f ackermann_to_vesc    >/dev/null 2>&1 || true
 pkill -f "bringup_launch.py"  >/dev/null 2>&1 || true
 sleep 1

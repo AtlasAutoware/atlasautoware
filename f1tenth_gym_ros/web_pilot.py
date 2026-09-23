@@ -11,16 +11,47 @@ seconds (0.25) a neutral Joy is published and the car stops. /joy feeds the unch
 F1TENTH chain: joy_teleop (F310 profile: button 4 = dead-man, axis 1 throttle, axis 3
 steer) -> ackermann_mux -> ackermann_to_vesc -> vesc_driver.
 """
-import json, socket, threading, time
+import json, os, socket, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 import numpy as np, cv2
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, Joy, LaserScan
+from nav_msgs.msg import Odometry
+from ackermann_msgs.msg import AckermannDriveStamped
+from std_msgs.msg import String
+try:
+    from f1tenth_gym_ros import pilot_autonomy as PA      # installed package (colcon)
+except ImportError:
+    import pilot_autonomy as PA                           # run from the source directory
 
 N_AXES, N_BUTTONS = 6, 11
-S = {'jpg': None, 'jpg_t': 0.0, 'cmd': None, 'cmd_t': 0.0, 'src': '-', 'v': None, 'rx': 0, 'scan': None, 'lock': threading.Lock()}
+TRIM_FILE = os.path.expanduser('~/.atlascar_trim.json')   # steering trim survives restarts
+S = {'jpg': None, 'jpg_t': 0.0, 'cmd': None, 'cmd_t': 0.0, 'src': '-', 'v': None, 'rx': 0, 'scan': None,
+     'trim': 0.0, 'video': {'width': 480, 'quality': 60, 'fps': 15.0}, 'viewers': 0,
+     'seen': {}, 'odom_topic': '/pf/pose/odom', 'rec': {}, 'rec_t': 0.0, 'lock': threading.Lock()}
+SUP = PA.Supervisor()          # raceline_mpc process + its stop conditions
+JOB = PA.Job()                 # track conversion / raceline optimization
+NODE = [None]                  # the running WebPilot, for handlers that need ROS
+
+
+DEFAULT_TRIM = 0.0                  # a nonzero trim biases one way and steals throw from the
+                                    # other side; correct a straight-line pull at the servo
+                                    # center (vesc.yaml offset) instead. Q/E still fine-tunes.
+
+
+def load_trim():
+    try:
+        with open(TRIM_FILE) as f: return float(json.load(f).get('steer_trim', DEFAULT_TRIM))
+    except (OSError, ValueError): return 0.0
+
+
+def save_trim(t):
+    try:
+        with open(TRIM_FILE, 'w') as f: json.dump({'steer_trim': t}, f)
+    except OSError: pass
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>AtlasCar pilot</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -36,7 +67,22 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>AtlasCar pilo
  input[type=range]{width:120px;vertical-align:middle}
  #lidar{position:fixed;right:12px;bottom:12px;width:260px;height:260px;background:rgba(0,0,0,.55);border-radius:8px}
  #lbl{position:fixed;right:16px;bottom:276px;font-size:12px;color:#9cf}
+ #panel{position:fixed;left:12px;top:46px;width:330px;max-height:calc(100vh - 120px);overflow:auto;background:rgba(0,0,0,.72);border-radius:8px;padding:10px 12px}
+ #panel h3{margin:2px 0 8px;font-size:13px;color:#9cf;text-transform:none}
+ #panel section{border-top:1px solid #333;padding-top:8px;margin-top:8px}
+ #panel label{display:block;margin:4px 0;font-size:12px}
+ #panel input[type=text],#panel input[type=number],#panel select{width:150px;background:#111;color:#ddd;border:1px solid #444;border-radius:4px;padding:2px 4px}
+ button{background:#234;color:#dfe;border:1px solid #567;border-radius:5px;padding:4px 10px;cursor:pointer}
+ button:hover{background:#356}
+ #engage{background:#264;border-color:#4a7}
+ #estop{background:#722;border-color:#c55;font-weight:700}
+ .chk{font-size:12px;margin:2px 0}.chk b{display:inline-block;width:14px}
+ .ok{color:#6d9}.bad{color:#e87}
+ #joblog{white-space:pre-wrap;font:11px ui-monospace,Menlo,monospace;color:#9c9;max-height:130px;overflow:auto;background:#0a0a0a;padding:4px;border-radius:4px}
+ #tprev{max-width:100%;border-radius:4px;margin-top:6px;display:none}
+ #autobadge{position:fixed;left:50%;transform:translateX(-50%);top:44px;background:#2a7;color:#031;font-weight:700;padding:4px 14px;border-radius:6px;display:none}
 </style></head><body>
+<div id="autobadge">SELF-DRIVING &mdash; press Space or Esc to stop</div>
 <img id="v" src="/stream">
 <canvas id="lidar" width="260" height="260"></canvas><span id="lbl">lidar 6 m <label><input id="mirror" type="checkbox"> mirror</label></span>
 <div id="hud">
@@ -44,11 +90,67 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>AtlasCar pilo
  <span>thr <span class="bar"><i id="tb"></i></span> <span id="tv">0.00</span></span>
  <span>steer <span class="bar"><i id="sb"></i></span> <span id="sv">0.00</span></span>
  <span>max <input id="max" type="range" min="0.1" max="1" step="0.05" value="0.4"> <span id="mv">40%</span></span>
+ <span>trim <button id="tl">&lsaquo;</button> <span id="trim">0.00</span> <button id="tr">&rsaquo;</button></span>
+ <span>video <select id="vq"><option value="normal">normal</option><option value="low">low (cellular)</option></select></span>
  <span id="pad">no gamepad</span>
  <span id="link">link: -</span>
  <span id="batt">batt: -</span>
 </div>
-<div id="help">W/S throttle &nbsp; A/D steer &nbsp; (keys held = armed; release = stop) &nbsp;|&nbsp; gamepad: hold LB, left stick throttle, right stick steer</div>
+<div id="help">W/S throttle &nbsp; A/D steer &nbsp; Q/E trim (car pulls right &rarr; press Q) &nbsp; (keys held = armed; release = stop) &nbsp;|&nbsp; gamepad: hold LB, left stick throttle, right stick steer &nbsp;|&nbsp; <a href="#" id="togglepanel" style="color:#9cf">panel</a></div>
+
+<div id="panel">
+<h3>Self-driving (raceline)</h3>
+<label>raceline <select id="rl"></select></label>
+<label>pose topic <select id="odom">
+  <option value="/pf/pose/odom">/pf/pose/odom (localization)</option>
+  <option value="/ekf/odom">/ekf/odom (dead reckoning)</option>
+  <option value="/vesc/odom">/vesc/odom (wheel only)</option></select></label>
+<label>speed cap <input id="vs" type="range" min="0.1" max="1" step="0.05" value="0.3"> <span id="vsv">30%</span></label>
+<div id="checks"></div>
+<div style="margin-top:6px">
+  <button id="engage">ENGAGE</button>
+  <button id="estop">STOP</button>
+  <span id="autosecs" style="font-size:12px;color:#9c9"></span>
+</div>
+<div style="font-size:11px;color:#999;margin-top:6px">Holding a key or the gamepad dead-man always
+overrides the policy (the mux gives teleop priority). Closing this tab stops the car.</div>
+
+<section>
+<h3>Goal policy (distilled student)</h3>
+<label>goal <input id="pinstr" type="text" placeholder="turn left, then go straight to the end and stop" style="width:290px"></label>
+<label>max speed <input id="pspd" type="range" min="0.2" max="1.5" step="0.1" value="0.6"> <span id="pspdv">0.6 m/s</span></label>
+<div style="margin-top:4px"><button id="pengage" style="background:#264;border-color:#4a7">ENGAGE POLICY</button>
+  <span style="font-size:11px;color:#999">needs models/student.onnx on the car; same STOP / Space / override as raceline</span></div>
+</section>
+
+<section>
+<h3>Record a demonstration</h3>
+<label>instruction <input id="instr" type="text" placeholder="follow the hallway to the doors and stop" style="width:290px"></label>
+<div style="margin-top:4px">
+  <button id="recstart" style="background:#622;border-color:#a44">&#9679; REC</button>
+  <button id="recgood">stop: good</button>
+  <button id="recbad">stop: bad</button>
+  <button id="recdrop" title="stop and delete">discard</button>
+</div>
+<div id="recst" style="font-size:12px;color:#9c9;margin-top:4px">logger not running</div>
+</section>
+
+<section>
+<h3>Track picture &rarr; raceline</h3>
+<label>name <input id="tname" type="text" placeholder="hall_loop"></label>
+<label>picture <input id="tfile" type="file" accept="image/*"></label>
+<label>kind <select id="tmode">
+  <option value="photo">photo / drawing (dark ink = wall)</option>
+  <option value="map">occupancy map (SLAM .pgm/.png)</option></select></label>
+<label>lane width <input id="twidth" type="number" step="0.05" value="1.0"> m (sets the scale)</label>
+<div style="margin-top:6px">
+  <button id="tup">Upload &amp; convert</button>
+  <button id="tbuild">Build raceline</button>
+</div>
+<img id="tprev">
+<div id="joblog"></div>
+</section>
+</div>
 <script>
 const keys={}; let thr=0, str=0, lastSend=0, lastArmed=-1e9, rtt='-', padName=null;
 const $=id=>document.getElementById(id);
@@ -56,6 +158,18 @@ addEventListener('keydown',e=>{if(['w','a','s','d','W','A','S','D'].includes(e.k
 addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=0;});
 addEventListener('blur',()=>{for(const k in keys)keys[k]=0;});
 $('max').oninput=()=>{$('mv').textContent=Math.round($('max').value*100)+'%';};
+// ── steering trim: stored on the car, applied to every source (keys, pad, UDP) ──
+let trim=0;
+function showTrim(t){trim=t;$('trim').textContent=(t>=0?'+':'')+t.toFixed(2);
+  $('trim').title='equivalent vesc.yaml steering_angle_to_servo_offset change: '+(-0.4126*t).toFixed(4);}
+function setTrim(t){t=Math.max(-0.3,Math.min(0.3,t));
+  fetch('/trim',{method:'POST',body:JSON.stringify({steer_trim:t})}).then(r=>r.json()).then(s=>showTrim(s.steer_trim)).catch(()=>{});}
+$('tl').onclick=()=>setTrim(trim+0.01); $('tr').onclick=()=>setTrim(trim-0.01);   // ROS: left = +
+addEventListener('keydown',e=>{if(e.key==='q'||e.key==='Q')setTrim(trim+0.01); if(e.key==='e'||e.key==='E')setTrim(trim-0.01);});
+fetch('/trim').then(r=>r.json()).then(s=>showTrim(s.steer_trim)).catch(()=>{});
+// ── video quality: normal (480 px, q60, 15 fps) or low for cellular (320 px, q45, 10 fps) ──
+$('vq').onchange=()=>{const low=$('vq').value==='low';
+  fetch('/video?w='+(low?320:480)+'&q='+(low?45:60)+'&fps='+(low?10:15),{method:'POST'}).catch(()=>{});};
 function step(target,cur,rate){return cur+Math.max(-rate,Math.min(rate,target-cur));}
 function tick(){
   const dt=0.02, max=parseFloat($('max').value);
@@ -67,7 +181,7 @@ function tick(){
     for(let i=0;i<Math.min(11,gp.buttons.length);i++) buttons[i]=gp.buttons[i].pressed?1:0;
     if(buttons[4]){ src='pad'; thr=-gp.axes[1]*max; str=-gp.axes[2]; axes[1]=thr; }
   }
-  const kthr=(keys.w?1:0)-(keys.s?1:0), kstr=(keys.a?1:0)-(keys.d?1:0);   // ROS: left = +1
+  const kthr=(keys.w?1:0)-(keys.s?1:0), kstr=(keys.a?1:0)-(keys.d?1:0);   // ROS: left = +1 (A=left, D=right)
   if(kthr||kstr){ src='keys';
     thr=step(kthr*max,thr,1.5*dt); str=step(kstr,str,4*dt);
     axes=[0,thr,1,str,0,1]; buttons[4]=1;
@@ -97,6 +211,73 @@ function tick(){
 }
 setInterval(tick,20);
 addEventListener('gamepadconnected',e=>{padName=e.gamepad.id.slice(0,28);});
+
+// ── self-driving ────────────────────────────────────────────────────────────
+let auto=false;
+$('togglepanel').onclick=e=>{e.preventDefault();const p=$('panel');p.style.display=p.style.display==='none'?'block':'none';};
+$('vs').oninput=()=>{$('vsv').textContent=Math.round($('vs').value*100)+'%';};
+function renderAuto(s){
+  auto=s.engaged;
+  $('autobadge').style.display=auto?'block':'none';
+  $('autosecs').textContent=auto?(s.secs+' s  '+(s.params.raceline||'')):(s.last_stop||'');
+  $('checks').innerHTML=(s.checks||[]).map(c=>
+    `<div class="chk"><b class="${c.ok?'ok':'bad'}">${c.ok?'✓':'✗'}</b>${c.name}: <span style="color:#999">${c.detail}</span></div>`).join('');
+  const sel=$('rl'), cur=sel.value;
+  const opts=(s.racelines||[]).map(r=>`<option ${r===cur?'selected':''}>${r}</option>`).join('');
+  if(sel.dataset.n!=String((s.racelines||[]).length)){sel.innerHTML=opts;sel.dataset.n=String((s.racelines||[]).length);}
+  if(s.job&&s.job.log&&s.job.log.length){$('joblog').textContent=s.job.log.join('\n');$('joblog').scrollTop=1e6;}
+  const r=s.rec||{};
+  $('recst').textContent=!r.alive?'logger not running (start episode_logger)':
+    r.recording?`● REC ${r.episode_id}  ${r.frames} frames  ${r.secs}s  “${r.instruction}”`:
+    `idle · ${r.episodes||0} episodes in ${r.root||'~/episodes'}`;
+  $('recst').style.color=r.recording?'#f88':'#9c9';
+}
+function rec(path,body){fetch(path,{method:'POST',body:JSON.stringify(body)}).then(r=>r.json()).then(renderAuto);}
+$('recstart').onclick=()=>rec('/rec/start',{instruction:$('instr').value});
+$('recgood').onclick=()=>rec('/rec/stop',{label:'good'});
+$('recbad').onclick=()=>rec('/rec/stop',{label:'bad'});
+$('recdrop').onclick=()=>rec('/rec/stop',{discard:true});
+function pollAuto(){
+  const q=auto?'/auto/hb':'/auto?raceline='+encodeURIComponent($('rl').value||'');
+  fetch(q,{method:auto?'POST':'GET'}).then(r=>r.json()).then(renderAuto).catch(()=>{});
+}
+setInterval(pollAuto,500);
+$('engage').onclick=()=>{
+  if(!confirm('Engage self-driving? The car will move on its own.\nSpace or Esc stops it; holding a key overrides it.'))return;
+  fetch('/auto/engage',{method:'POST',body:JSON.stringify({raceline:$('rl').value,v_scale:parseFloat($('vs').value)})})
+   .then(r=>r.json()).then(s=>{if(s.error){alert(s.error+(s.checks?'\n'+s.checks.filter(c=>!c.ok).map(c=>'- '+c.name+': '+c.detail).join('\n'):''));}else renderAuto(s);});
+};
+$('estop').onclick=()=>fetch('/auto/stop',{method:'POST'}).then(r=>r.json()).then(renderAuto);
+$('pspd').oninput=()=>{$('pspdv').textContent=$('pspd').value+' m/s';};
+$('pengage').onclick=()=>{
+  const g=$('pinstr').value.trim(); if(!g){alert('type a goal instruction');return;}
+  if(!confirm('Engage the goal policy?\nGoal: "'+g+'"\nThe car will move on its own. Space/Esc stops it; holding a key overrides it.'))return;
+  fetch('/auto/engage',{method:'POST',body:JSON.stringify({mode:'policy',instruction:g,max_speed:parseFloat($('pspd').value)})})
+   .then(r=>r.json()).then(s=>{if(s.error){alert(s.error+(s.checks?'\n'+s.checks.filter(c=>!c.ok).map(c=>'- '+c.name+': '+c.detail).join('\n'):''));}else renderAuto(s);});
+};
+$('odom').onchange=()=>fetch('/auto/odom',{method:'POST',body:JSON.stringify({odom_topic:$('odom').value})}).then(r=>r.json()).then(renderAuto);
+addEventListener('keydown',e=>{if((e.key===' '||e.key==='Escape')&&auto){e.preventDefault();$('estop').onclick();}});
+
+// ── track picture -> map -> raceline ────────────────────────────────────────
+$('tup').onclick=()=>{
+  const f=$('tfile').files[0], n=$('tname').value.trim();
+  if(!f||!n){alert('pick a picture and give it a name');return;}
+  const fd=new FormData(); fd.append('name',n); fd.append('mode',$('tmode').value);
+  fd.append('track_width',$('twidth').value); fd.append('file',f);
+  $('joblog').textContent='uploading '+Math.round(f.size/1024)+' kB...';
+  fetch('/track/upload',{method:'POST',body:fd}).then(r=>r.json()).then(s=>{
+    if(s.error){$('joblog').textContent=s.error;return;}
+    setTimeout(()=>{const i=$('tprev');i.src='/preview?kind=map&name='+encodeURIComponent(n)+'&t='+Date.now();i.style.display='block';},2500);
+  });
+};
+$('tbuild').onclick=()=>{
+  const n=$('tname').value.trim(); if(!n){alert('name?');return;}
+  $('joblog').textContent='optimizing raceline (this takes a minute)...';
+  fetch('/track/build',{method:'POST',body:JSON.stringify({name:n})}).then(r=>r.json()).then(s=>{
+    if(s.error)$('joblog').textContent=s.error;
+    else setTimeout(()=>{const i=$('tprev');i.src='/preview?kind=raceline&name='+encodeURIComponent(n)+'&t='+Date.now();i.style.display='block';},60000);
+  });
+};
 // ── lidar: top-down plot, car at centre, forward = up, 6 m radius ──
 const cv=$('lidar'), ctx=cv.getContext('2d'), R=6.0, SC=124/R;
 function drawScan(s){
@@ -104,10 +285,34 @@ function drawScan(s){
   for(const m of [1,2,4]){ctx.beginPath();ctx.arc(130,130,m*SC,0,2*Math.PI);ctx.stroke();}
   ctx.beginPath();ctx.moveTo(130,130);ctx.lineTo(130,4);ctx.stroke();       // heading
   if(!s){ctx.fillStyle='#777';ctx.fillText('no /scan',100,134);return;}
-  const mir=$('mirror').checked?-1:1; ctx.fillStyle='#4cf';
-  for(let i=0;i<s.r.length;i++){ const r=s.r[i]; if(!(r>0.05&&r<R)) continue;
-    const a=s.a0+i*s.da, x=130-mir*r*Math.sin(a)*SC, y=130-r*Math.cos(a)*SC; ctx.fillRect(x-1,y-1,2,2); }
+  const mir=$('mirror').checked?-1:1;
+  const plot=(sc,col,sz)=>{ctx.fillStyle=col;
+    for(let i=0;i<sc.r.length;i++){ const r=sc.r[i]; if(!(r>0.05&&r<R)) continue;
+      const a=sc.a0+i*sc.da, x=130-mir*r*Math.sin(a)*SC, y=130-r*Math.cos(a)*SC; ctx.fillRect(x-sz/2,y-sz/2,sz,sz); }};
+  plot(s,'#4cf',2);                                                              // lidar
+  if(s.depth){plot(s.depth,'#fa3',3); ctx.fillStyle='#fa3'; ctx.fillText('depth',4,254);}   // camera depth, in the height band
+  drawPath();                                                                    // predicted turn path
   ctx.fillStyle='#e94'; ctx.fillRect(126,126,8,8);                              // the car
+}
+// Predicted path: the Ackermann arc the car follows at the current steering command
+// (steering command + trim). Bicycle model, rear axle. Green = where you're heading.
+const WB=0.33, MAXSTEER=0.34, PATHLEN=4.0;
+function drawPath(){
+  const mir=$('mirror').checked?-1:1;
+  // Driver command only, WITHOUT trim: trim cancels the car's mechanical bias, so at
+  // neutral the car actually travels straight. Adding it here drew a phantom curve at rest.
+  const d=Math.max(-1,Math.min(1,str))*MAXSTEER;         // steering angle (rad)
+  ctx.strokeStyle='#5e9'; ctx.lineWidth=2; ctx.beginPath();
+  const N=40;
+  for(let k=0;k<=N;k++){ const sarc=PATHLEN*k/N; let fwd,left;
+    if(Math.abs(d)<1e-3){ fwd=sarc; left=0; }
+    else{ const Rr=WB/Math.tan(d), phi=sarc/Rr; fwd=Rr*Math.sin(phi); left=Rr*(1-Math.cos(phi)); }
+    const x=130-mir*left*SC, y=130-fwd*SC;
+    if(k===0)ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  if(Math.abs(d)>1e-3){ const Rr=Math.abs(WB/Math.tan(d));
+    ctx.fillStyle='#5e9'; ctx.fillText('R '+Rr.toFixed(1)+' m',4,14); }
 }
 setInterval(()=>fetch('/scan').then(r=>r.json()).then(drawScan).catch(()=>drawScan(null)),200);
 </script></body></html>"""
@@ -126,13 +331,33 @@ class H(BaseHTTPRequestHandler):
         if self.path == '/status':
             self._json(status()); return
         if self.path == '/scan':
-            with S['lock']: sc = S['scan']
-            self._json(sc if sc else {}); return
+            with S['lock']:
+                sc = dict(S['scan']) if S['scan'] else {}
+                ds = S.get('dscan'); fresh = (time.time() - S['seen'].get('depth', 0)) < 1.0
+            if sc and ds and fresh: sc['depth'] = ds
+            self._json(sc); return
+        if self.path == '/trim':
+            with S['lock']: t = S['trim']
+            self._json({'steer_trim': t}); return
+        u = urlparse(self.path)
+        if u.path == '/auto':
+            self._json(auto_status(parse_qs(u.query).get('raceline', [None])[0])); return
+        if u.path == '/preview':                                  # map preview / raceline overlay PNG
+            name = PA.safe_name(parse_qs(u.query).get('name', [''])[0])
+            kind = parse_qs(u.query).get('kind', ['map'])[0]
+            path = (os.path.join(PA.MAPS, f'{name}_preview.png') if kind == 'map'
+                    else os.path.join(PA.RACELINES, f'{name}_auto_overlay.png'))
+            if not name or not os.path.isfile(path):
+                self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers(); return
+            b = open(path, 'rb').read()
+            self.send_response(200); self.send_header('Content-Type', 'image/png')
+            self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b); return
         if self.path != '/stream':
             self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers(); return
         self.send_response(200); self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
         self.send_header('Cache-Control', 'no-cache'); self.end_headers()
         last = 0.0
+        with S['lock']: S['viewers'] += 1          # _img encodes only while this is nonzero
         try:
             while True:
                 with S['lock']: jpg, t = S['jpg'], S['jpg_t']
@@ -140,12 +365,96 @@ class H(BaseHTTPRequestHandler):
                 last = t
                 self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + str(len(jpg)).encode() + b'\r\n\r\n' + jpg + b'\r\n')
         except (BrokenPipeError, ConnectionResetError): pass
+        finally:
+            with S['lock']: S['viewers'] -= 1
     def do_POST(self):
-        if self.path != '/cmd':
-            self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers(); return
-        n = int(self.headers.get('Content-Length', 0)); body = self.rfile.read(n)
-        if accept(body, 'web:' + self.client_address[0]): self._json(status())
-        else: self._json({'error': 'bad command'}, 400)
+        u = urlparse(self.path); n = int(self.headers.get('Content-Length', 0)); body = self.rfile.read(n)
+        if u.path == '/cmd':
+            if accept(body, 'web:' + self.client_address[0]): self._json(status())
+            else: self._json({'error': 'bad command'}, 400)
+            return
+        if u.path == '/trim':
+            try: t = max(-0.3, min(0.3, float(json.loads(body.decode())['steer_trim'])))
+            except (ValueError, KeyError, TypeError): self._json({'error': 'bad trim'}, 400); return
+            with S['lock']: S['trim'] = t
+            save_trim(t); self._json({'steer_trim': t}); return
+        if u.path == '/video':
+            q = parse_qs(u.query)
+            with S['lock']:
+                v = S['video']
+                v['width'] = int(q.get('w', [v['width']])[0]); v['quality'] = int(q.get('q', [v['quality']])[0]); v['fps'] = float(q.get('fps', [v['fps']])[0])
+                self._json(dict(v)); return
+
+        # ── autonomy ────────────────────────────────────────────────────────────
+        if u.path == '/auto/hb':
+            SUP.heartbeat(); self._json(auto_status()); return
+        if u.path == '/auto/stop':
+            SUP.stop('stop button'); self._json(auto_status()); return
+        if u.path == '/auto/odom':
+            try: topic = str(json.loads(body.decode())['odom_topic'])[:80]
+            except (ValueError, KeyError, TypeError): self._json({'error': 'bad topic'}, 400); return
+            NODE[0]._watch_odom(topic); self._json(auto_status()); return
+        if u.path == '/auto/engage':
+            try: d = json.loads(body.decode())
+            except ValueError: self._json({'error': 'bad json'}, 400); return
+            with S['lock']: odom = S['odom_topic']; fusion_live = (time.time() - S['seen'].get('depth', 0)) < 1.0
+            scan_topic = '/scan_fused' if fusion_live else '/scan'    # depth-augmented when available
+            if d.get('mode') == 'policy':                              # mode 3: distilled student
+                a = ages()
+                checks = [c for c in SUP.preflight(a, '', odom)[1] if c['name'] in ('lidar /scan', 'VESC telemetry', 'battery')]
+                checks.append({'name': 'camera', 'ok': a.get('image') is not None and a['image'] < 1.5,
+                               'detail': 'no frames' if a.get('image') is None else f"{a['image']*1000:.0f} ms ago"})
+                if not all(c['ok'] for c in checks) and not d.get('override'):
+                    self._json({'error': 'preflight failed', 'checks': checks}, 409); return
+                SUP.heartbeat()
+                ok, msg = SUP.engage_policy(str(d.get('instruction', ''))[:200], d.get('max_speed', 0.6), scan_topic=scan_topic)
+                self._json(auto_status() if ok else {'error': msg}, 200 if ok else 400); return
+            rl = os.path.basename(str(d.get('raceline', '')))
+            ok, checks = SUP.preflight(ages(), rl, odom)
+            if not ok and not d.get('override'):
+                self._json({'error': 'preflight failed', 'checks': checks}, 409); return
+            SUP.heartbeat()
+            ok, msg = SUP.engage(rl, d.get('v_scale', 0.3), odom, scan_topic=scan_topic,
+                                 extra=d.get('extra') or {})
+            self._json(auto_status(rl) if ok else {'error': msg}, 200 if ok else 400); return
+
+        # ── episode recording ───────────────────────────────────────────────────
+        if u.path in ('/rec/start', '/rec/stop'):
+            try: d = json.loads(body.decode() or '{}')
+            except ValueError: d = {}
+            if u.path == '/rec/start':
+                NODE[0].rec_cmd({'action': 'start', 'instruction': str(d.get('instruction', ''))[:200]})
+            else:
+                NODE[0].rec_cmd({'action': 'stop', 'label': str(d.get('label', 'unlabelled'))[:20],
+                                 'discard': bool(d.get('discard', False))})
+            time.sleep(0.15)                          # let the logger answer on /episode/status
+            self._json(auto_status()); return
+
+        # ── track pictures ──────────────────────────────────────────────────────
+        if u.path == '/track/upload':
+            fields, filename, data = PA.parse_multipart(body, self.headers.get('Content-Type'))
+            name = PA.safe_name(fields.get('name', ''))
+            if not name or not data:
+                self._json({'error': 'need a name (letters/digits/_/-) and an image file'}, 400); return
+            ext = os.path.splitext(filename or '')[1].lower() or '.jpg'
+            if ext not in ('.jpg', '.jpeg', '.png', '.pgm', '.bmp', '.webp'):
+                self._json({'error': f'unsupported image type {ext}'}, 400); return
+            path = PA.save_upload(data, name, ext)
+            cmd = PA.convert_cmd(path, name, fields.get('mode', 'photo'),
+                                 fields.get('track_width', '1.0'), fields.get('resolution') or None)
+            ok, msg = JOB.start(cmd, f'convert {name}')
+            self._json({'started': ok, 'msg': msg, 'name': name, 'bytes': len(data)},
+                       200 if ok else 409); return
+        if u.path == '/track/build':
+            try: d = json.loads(body.decode())
+            except ValueError: d = {}
+            name = PA.safe_name(d.get('name', ''))
+            if not name or not os.path.isfile(os.path.join(PA.MAPS, f'{name}.yaml')):
+                self._json({'error': 'no such map; convert a picture first'}, 400); return
+            ok, msg = JOB.start(PA.build_cmd(name, d.get('a_lat', 6.5), d.get('v_max', 7.0),
+                                             d.get('margin', 0.2)), f'raceline {name}')
+            self._json({'started': ok, 'msg': msg}, 200 if ok else 409); return
+        self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers()
 
 
 def accept(raw, src):
@@ -160,7 +469,28 @@ def accept(raw, src):
 def status():
     with S['lock']:
         age = None if S['cmd'] is None else time.time() - S['cmd_t']
-        return {'link': age is not None and age < 0.25, 'age_ms': None if age is None else round(age * 1000), 'src': S['src'], 'v': S['v']}
+        return {'link': age is not None and age < 0.25, 'age_ms': None if age is None else round(age * 1000), 'src': S['src'], 'v': S['v'], 'auto': SUP.engaged()}
+
+
+def ages():
+    """Seconds since the last message on each preflight topic (None = never seen)."""
+    now = time.time()
+    with S['lock']: seen, volts = dict(S['seen']), S['v']
+    a = {k: (None if t is None else now - t) for k, t in seen.items()}
+    a['volts'] = volts
+    return a
+
+
+def auto_status(raceline=None):
+    st = SUP.status()
+    with S['lock']: odom = S['odom_topic']
+    rl = raceline or st['params'].get('raceline', '')
+    ok, checks = SUP.preflight(ages(), rl, odom)
+    st.update({'checks': checks, 'ready': ok, 'odom_topic': odom, 'job': JOB.status(), **PA.list_tracks()})
+    with S['lock']:
+        rec = dict(S['rec']); rec['alive'] = (time.time() - S['rec_t']) < 2.0 if S['rec_t'] else False
+    st['rec'] = rec                                   # episode logger state, if it is running
+    return st
 
 
 class WebPilot(Node):
@@ -169,42 +499,112 @@ class WebPilot(Node):
         for k, v in (('http_port', 8080), ('udp_port', 5005), ('joy_topic', '/joy'), ('timeout', 0.25), ('publish_hz', 50.0),
                      ('image_topic', '/camera/color/image_raw'), ('width', 480), ('quality', 60), ('fps', 15.0), ('udp_invert_axes', True)):
             self.declare_parameter(k, v)
+        # trim is configurable so the simulator (no mechanical bias) can default to 0
+        self.declare_parameter('trim_file', TRIM_FILE)
+        self.declare_parameter('default_trim', DEFAULT_TRIM)
         p = lambda n: self.get_parameter(n).value
-        self.timeout, self.width, self.q, self.min_dt = float(p('timeout')), int(p('width')), int(p('quality')), 1.0 / float(p('fps'))
+        globals()['TRIM_FILE'] = str(p('trim_file')); globals()['DEFAULT_TRIM'] = float(p('default_trim'))
+        self.timeout = float(p('timeout'))
+        with S['lock']:
+            S['video'] = {'width': int(p('width')), 'quality': int(p('quality')), 'fps': float(p('fps'))}
+            S['trim'] = load_trim()
         self.udp_invert = bool(p('udp_invert_axes')); self.last_jpg = 0.0; self.link_up = False
+        if S['trim']: self.get_logger().info(f"steering trim restored: {S['trim']:+.2f} ({TRIM_FILE})")
         self.pub = self.create_publisher(Joy, p('joy_topic'), 10)
+        # Explicit "hold at zero" on the teleop topic while nobody is driving and no policy
+        # is engaged. joy_teleop's deadman-less `default` block used to do this, but it also
+        # masked autonomy in the mux (teleop outranks navigation), so it was removed and the
+        # job moved here where it can be suppressed while self-driving.
+        self.declare_parameter('teleop_topic', '/teleop')
+        self.declare_parameter('hold_zero_teleop', True)
+        self.hold_zero = bool(p('hold_zero_teleop'))
+        self.teleop_pub = self.create_publisher(AckermannDriveStamped, p('teleop_topic'), 10)
+        self.last_hold = 0.0
         self.create_subscription(Image, p('image_topic'), self._img, qos_profile_sensor_data)
         self.declare_parameter('scan_topic', '/scan'); self.last_scan = 0.0
         self.create_subscription(LaserScan, p('scan_topic'), self._scan, qos_profile_sensor_data)
+        # depth-derived virtual scan (depth_fusion node), overlaid on the page's lidar plot
+        self.declare_parameter('depth_scan_topic', '/scan_depth'); self.last_dscan = 0.0
+        self.create_subscription(LaserScan, p('depth_scan_topic'), self._dscan, 10)
         try:
             from vesc_msgs.msg import VescStateStamped
-            self.create_subscription(VescStateStamped, '/sensors/core', lambda m: S.__setitem__('v', round(float(m.state.voltage_input), 2)), 10)
+            self.create_subscription(VescStateStamped, '/sensors/core', self._core, 10)
         except Exception: pass
+        # preflight: watch the pose topic autonomy will use (switchable from the page)
+        self.declare_parameter('odom_topic', '/pf/pose/odom')
+        with S['lock']: S['odom_topic'] = p('odom_topic')
+        self._odom_sub = None
+        self._watch_odom(p('odom_topic'))
+        # episode logger (data collection for policy training): control + status over JSON strings
+        self.rec_pub = self.create_publisher(String, '/episode/cmd', 10)
+        self.create_subscription(String, '/episode/status', self._rec_status, 10)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(('0.0.0.0', int(p('udp_port')))); self.sock.setblocking(False)
         srv = ThreadingHTTPServer(('0.0.0.0', int(p('http_port'))), H); srv.daemon_threads = True
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.create_timer(1.0 / float(p('publish_hz')), self._tick)
         self.get_logger().info(f"web pilot: http://<car-ip>:{int(p('http_port'))}/  (UDP :{int(p('udp_port'))} also accepted); watchdog {self.timeout*1000:.0f} ms")
+        NODE[0] = self
+
+    def _rec_status(self, m):
+        try: d = json.loads(m.data)
+        except ValueError: return
+        with S['lock']: S['rec'], S['rec_t'] = d, time.time()
+
+    def rec_cmd(self, d):
+        self.rec_pub.publish(String(data=json.dumps(d)))
+
+    def _core(self, m):
+        with S['lock']:
+            S['v'] = round(float(m.state.voltage_input), 2); S['seen']['core'] = time.time()
+
+    def _watch_odom(self, topic):
+        """(Re)subscribe to the map-frame pose topic used for the preflight check."""
+        if self._odom_sub is not None:
+            self.destroy_subscription(self._odom_sub); self._odom_sub = None
+        with S['lock']:
+            S['odom_topic'] = topic; S['seen'].pop('odom', None)
+        if topic:
+            self._odom_sub = self.create_subscription(
+                Odometry, topic, lambda m: S['seen'].__setitem__('odom', time.time()), 10)
 
     def _img(self, m):
         now = time.time()
-        if now - self.last_jpg < self.min_dt or m.encoding not in ('rgb8', 'bgr8'): return
+        with S['lock']:
+            v = dict(S['video']); S['seen']['image'] = now; viewers = S['viewers']
+        # the timestamp above is what the preflight camera check reads; the 5 ms of resize
+        # and JPEG below is only worth paying when a /stream client is actually connected
+        if not viewers: return
+        if now - self.last_jpg < 1.0 / max(1.0, v['fps']) or m.encoding not in ('rgb8', 'bgr8'): return
         self.last_jpg = now
         a = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, 3)
-        if m.encoding == 'rgb8': a = a[:, :, ::-1]
-        if m.width != self.width: a = cv2.resize(a, (self.width, int(m.height * self.width / m.width)), interpolation=cv2.INTER_AREA)
-        ok, jpg = cv2.imencode('.jpg', a, [cv2.IMWRITE_JPEG_QUALITY, self.q])
+        w = int(v['width'])
+        # resize first, and on the contiguous buffer: INTER_AREA over the reversed-stride
+        # rgb8 view costs 4.8 ms against 1.6 ms, and the swap is 0.04 ms once downscaled
+        if m.width != w: a = cv2.resize(a, (w, int(m.height * w / m.width)), interpolation=cv2.INTER_AREA)
+        if m.encoding == 'rgb8': a = cv2.cvtColor(a, cv2.COLOR_RGB2BGR)
+        ok, jpg = cv2.imencode('.jpg', a, [cv2.IMWRITE_JPEG_QUALITY, int(v['quality'])])
         if ok:
             with S['lock']: S['jpg'], S['jpg_t'] = jpg.tobytes(), now
 
     def _scan(self, m):
         now = time.time()
+        with S['lock']: S['seen']['scan'] = now
         if now - self.last_scan < 0.2: return                    # 5 Hz is plenty for a picture
         self.last_scan = now
         k = max(1, len(m.ranges) // 360)                          # ~360 points
         rs = [round(float(r), 2) if r == r and r < 1e5 else 0.0 for r in m.ranges[::k]]
         with S['lock']: S['scan'] = {'a0': float(m.angle_min), 'da': float(m.angle_increment) * k, 'r': rs, 'rmax': float(m.range_max)}
+
+    def _dscan(self, m):
+        now = time.time()
+        if now - self.last_dscan < 0.2: return
+        self.last_dscan = now
+        k = max(1, len(m.ranges) // 360)
+        rs = [round(float(r), 2) if r == r and 0 < r < 1e5 else 0.0 for r in m.ranges[::k]]
+        with S['lock']:
+            S['dscan'] = {'a0': float(m.angle_min), 'da': float(m.angle_increment) * k, 'r': rs}
+            S['seen']['depth'] = now
 
     def _drain_udp(self):
         while True:
@@ -218,22 +618,39 @@ class WebPilot(Node):
 
     def _tick(self):
         self._drain_udp()
+        was = SUP.engaged(); SUP.tick()                          # heartbeat / process watchdog
+        if was and not SUP.engaged():
+            self.get_logger().warn(f'autonomy stopped: {SUP.last_stop}')
         msg = Joy(); msg.header.stamp = self.get_clock().now().to_msg(); msg.header.frame_id = 'web_pilot'
-        with S['lock']: cmd, age, src = S['cmd'], time.time() - S['cmd_t'], S['src']
+        with S['lock']: cmd, age, src, trim = S['cmd'], time.time() - S['cmd_t'], S['src'], S['trim']
         if cmd is not None and age <= self.timeout:
-            msg.axes, msg.buttons = cmd
+            axes = list(cmd[0])
+            axes[3] = max(-1.0, min(1.0, axes[3] + trim))        # steering trim (ROS: + = left)
+            msg.axes, msg.buttons = axes, cmd[1]
             if not self.link_up: self.link_up = True; self.get_logger().info(f'commands from {src}')
         else:
             msg.axes, msg.buttons = [0.0] * N_AXES, [0] * N_BUTTONS
             if self.link_up: self.link_up = False; self.get_logger().warn('no commands: neutral (car stops)')
         self.pub.publish(msg)
+        # brake-to-zero on the teleop topic, but only when a remote pilot has been present,
+        # nobody is holding the dead-man, and no policy is driving
+        armed = bool(msg.buttons[4]) if len(msg.buttons) > 4 else False
+        now = time.time()
+        if (self.hold_zero and cmd is not None and not armed and not SUP.engaged()
+                and now - self.last_hold >= 0.05):
+            self.last_hold = now
+            z = AckermannDriveStamped(); z.header.stamp = self.get_clock().now().to_msg()
+            self.teleop_pub.publish(z)
 
 
 def main(args=None):
     rclpy.init(args=args); n = WebPilot()
     try: rclpy.spin(n)
     except KeyboardInterrupt: pass
-    n.destroy_node(); rclpy.shutdown()
+    SUP.stop('web_pilot shutting down')
+    n.destroy_node()
+    try: rclpy.shutdown()
+    except Exception: pass                    # context may already be shut down on Ctrl-C
 
 
 if __name__ == '__main__':

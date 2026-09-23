@@ -39,6 +39,18 @@ import pca9685 as pca
 import vesc_protocol as vp
 
 
+def bounded_command(speed, steer, cfg):
+    """Reject corrupt inputs before either actuator is written; bound valid ones."""
+    speed, steer = float(speed), float(steer)
+    if not math.isfinite(speed) or not math.isfinite(steer):
+        raise ValueError('drive speed and steering must be finite')
+    max_speed, max_steer = float(cfg['max_speed']), float(cfg['max_steer'])
+    if not all(math.isfinite(v) and v > 0 for v in (max_speed, max_steer)):
+        raise ValueError('max_speed and max_steer must be finite and positive')
+    return (max(-max_speed, min(max_speed, speed)),
+            max(-max_steer, min(max_steer, steer)))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Backends — same interface, picked at startup
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +68,7 @@ class PCA9685Backend:
         self.ch_str = int(cfg['steer_channel'])
 
     def command(self, speed, steer):
+        speed, steer = bounded_command(speed, steer, self.cfg)
         c = self.cfg
         self.dev.set_pulse_us(self.ch_thr, pca.speed_to_us(
             speed, c['max_speed'], c['neutral_us'],
@@ -93,12 +106,14 @@ class VescSerialBackend:
         self.erpm_gain = float(cfg['erpm_gain'])
         # current-control (torque) parameters — mirror f1tenth_stack vesc.yaml so the
         # self-driving path launches the same way the manual joystick path does.
+        # Optional with defaults: control_mode 'speed' (the original behaviour) needs none
+        # of these, and a config written before current mode existed must still load.
         self.control_mode = str(cfg.get('control_mode', 'speed')).lower()
         self.max_speed = float(cfg['max_speed'])
-        self.max_current = float(cfg['max_current'])
-        self.min_current = float(cfg['min_current'])
-        self.brake_current = float(cfg['brake_current'])
-        self.current_deadband = float(cfg['current_deadband'])
+        self.max_current = float(cfg.get('max_current', 45.0))
+        self.min_current = float(cfg.get('min_current', 10.0))
+        self.brake_current = float(cfg.get('brake_current', 15.0))
+        self.current_deadband = float(cfg.get('current_deadband', 0.05))
         self.parser = vp.PacketParser()
 
     def _write_throttle(self, speed):
@@ -118,6 +133,7 @@ class VescSerialBackend:
             self.ser.write(vp.pkt_set_rpm(speed * self.erpm_gain))
 
     def command(self, speed, steer):
+        speed, steer = bounded_command(speed, steer, self.cfg)
         self._write_throttle(speed)
         c = self.cfg
         frac = max(-1.0, min(1.0, float(steer) / float(c['max_steer'])))
@@ -170,7 +186,7 @@ def probe_vesc(cfg, log):
     try:
         import serial
         ser = serial.Serial(cfg['serial_port'], int(cfg['serial_baud']),
-                            timeout=0.1)
+                            timeout=0.1, write_timeout=0.1)
         parser = vp.PacketParser()
         for _ in range(3):                       # fw-version handshake
             ser.write(vp.pkt_request(vp.COMM_FW_VERSION))
@@ -238,6 +254,7 @@ def _make_node():
             self.declare_parameter('serial_baud', 115200)
             self.declare_parameter('erpm_gain', 4614.0)  # erpm per m/s
             # vesc-uart motor command mode (mirrors f1tenth_stack/config/vesc.yaml)
+            self.declare_parameter('core_topic', '/sensors/core')
             self.declare_parameter('control_mode', 'speed')   # 'speed' (SET_RPM) | 'current'
             self.declare_parameter('max_current', 45.0)       # A at full-speed command
             self.declare_parameter('min_current', 10.0)       # A feed-forward to break stiction
@@ -256,6 +273,15 @@ def _make_node():
                 'serial_port', 'serial_baud', 'erpm_gain',
                 'control_mode', 'max_current', 'min_current',
                 'brake_current', 'current_deadband')}
+            # Validate before opening hardware: invalid limits/timeouts must not
+            # leave an already-open actuator outside the shutdown path.
+            bounded_command(0.0, 0.0, cfg)
+            self.timeout = float(self.get_parameter('cmd_timeout').value)
+            arm_time = float(self.get_parameter('arm_time').value)
+            if not math.isfinite(self.timeout) or self.timeout <= 0:
+                raise ValueError('cmd_timeout must be finite and positive')
+            if not math.isfinite(arm_time) or arm_time < 0:
+                raise ValueError('arm_time must be finite and nonnegative')
             prefer = self.get_parameter('backend').value
             self.backend = pick_backend(
                 prefer, cfg, lambda m: self.get_logger().info(m))
@@ -266,9 +292,7 @@ def _make_node():
                     f"{cfg['serial_port']}")
             self.get_logger().info(f'backend: {self.backend.name}')
 
-            self.timeout = float(self.get_parameter('cmd_timeout').value)
-            self.arm_until = time.monotonic() + \
-                float(self.get_parameter('arm_time').value)
+            self.arm_until = time.monotonic() + arm_time
             # Arm the watchdog from startup: initialising to 0.0 disabled it
             # (the `> 0.0` guard) until the first /drive message ever arrived.
             self.last_cmd = time.monotonic()
@@ -282,6 +306,21 @@ def _make_node():
             if self.backend.has_telemetry:
                 self.odom_pub = self.create_publisher(
                     Odometry, self.get_parameter('odom_topic').value, 10)
+                # Full VESC state on /sensors/core, the topic f1tenth_stack's
+                # vesc_driver publishes and that web_pilot / the dashboards read
+                # for pack voltage, FET temp and fault codes. We cannot run
+                # vesc_driver alongside this node (one owner per serial port),
+                # so we republish the GET_VALUES frame we are already polling.
+                self.core_pub = None
+                try:
+                    from vesc_msgs.msg import VescStateStamped
+                    self._VescStateStamped = VescStateStamped
+                    self.core_pub = self.create_publisher(
+                        VescStateStamped,
+                        self.get_parameter('core_topic').value, 10)
+                except Exception as e:
+                    self.get_logger().warning(
+                        f'vesc_msgs unavailable — no /sensors/core telemetry: {e}')
                 self.erpm_gain = float(cfg['erpm_gain'])
                 self._telem_n = 0
                 self.create_timer(
@@ -289,15 +328,24 @@ def _make_node():
                     self._telemetry)
 
         def _drive_cb(self, msg):
-            self.last_cmd = time.monotonic()
-            self._wd_warned = False
-            if self.last_cmd < self.arm_until:          # arming: hold neutral
+            now = time.monotonic()
+            if now < self.arm_until:                   # arming: hold neutral
                 return
             try:
-                self.backend.command(float(msg.drive.speed),
-                                     float(msg.drive.steering_angle))
+                speed, steer = float(msg.drive.speed), float(msg.drive.steering_angle)
+                if not math.isfinite(speed) or not math.isfinite(steer):
+                    raise ValueError('drive speed and steering must be finite')
+                self.backend.command(speed, steer)
             except Exception as e:
-                self.get_logger().error(f'actuation write failed: {e}')
+                self.get_logger().error(f'actuation command failed: {e}')
+                # A partial write may already have applied throttle. Stop now,
+                # and leave the watchdog expired so it retries if neutral fails.
+                self.last_cmd = float('-inf')
+                self._wd_warned = False
+                self._watchdog()
+                return
+            self.last_cmd = now
+            self._wd_warned = False
 
         def _watchdog(self):
             if time.monotonic() - self.last_cmd <= self.timeout:
@@ -330,6 +378,22 @@ def _make_node():
             odom.child_frame_id = self.get_parameter('base_frame').value
             odom.twist.twist.linear.x = values['erpm'] / self.erpm_gain
             self.odom_pub.publish(odom)
+
+            if getattr(self, 'core_pub', None) is not None:
+                core = self._VescStateStamped()
+                core.header.stamp = odom.header.stamp
+                core.header.frame_id = self.get_parameter('base_frame').value
+                st = core.state
+                st.voltage_input = float(values['v_in'])
+                st.temp_fet = float(values['temp_fet'])
+                st.temp_motor = float(values['temp_motor'])
+                st.current_motor = float(values['current_motor'])
+                st.current_input = float(values['current_input'])
+                st.duty_cycle = float(values['duty'])
+                st.speed = float(values['erpm'])
+                st.displacement = int(values['tachometer'])
+                st.fault_code = int(values['fault'])
+                self.core_pub.publish(core)
             self._telem_n += 1
             if self._telem_n % 200 == 0:                 # ~every 10 s at 20 Hz
                 self.get_logger().info(
