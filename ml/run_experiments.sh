@@ -18,15 +18,16 @@ ev() {  # ev <onnx> <outdir> <perturbations...>
 }
 for seed in ${SEEDS:-0 1 2}; do
   echo "== seed $seed: BC, no augmentation"
-  $PY ml/train_policy.py --data data/demos --out runs/bc_noaug_s$seed --epochs $EP --seed $seed \
+  [ -f runs/bc_noaug_s$seed/eval_none/summary.json ] || { $PY ml/train_policy.py --data data/demos --out runs/bc_noaug_s$seed --epochs $EP --seed $seed \
       --cam-aug 0 --cam-drop 0 --beam-drop 0 > runs/bc_noaug_s$seed.log 2>&1
-  ev runs/bc_noaug_s$seed/student.onnx runs/bc_noaug_s$seed none
+  ev runs/bc_noaug_s$seed/student.onnx runs/bc_noaug_s$seed none; }
   echo "== seed $seed: BC + augmentation"
-  $PY ml/train_policy.py --data data/demos --out runs/bc_aug_s$seed --epochs $EP --seed $seed > runs/bc_aug_s$seed.log 2>&1
-  ev runs/bc_aug_s$seed/student.onnx runs/bc_aug_s$seed none nocam
+  [ -f runs/bc_aug_s$seed/eval_nocam/summary.json ] || { $PY ml/train_policy.py --data data/demos --out runs/bc_aug_s$seed --epochs $EP --seed $seed > runs/bc_aug_s$seed.log 2>&1
+  ev runs/bc_aug_s$seed/student.onnx runs/bc_aug_s$seed none nocam; }
   prev=runs/bc_aug_s$seed; dat="data/demos"
   for r in 1 2 3; do
     echo "== seed $seed: DAgger round $r"
+    if [ -f runs/dagger_s${seed}_r$r/eval_none/summary.json ]; then prev=runs/dagger_s${seed}_r$r; dat="$dat data/dagger_s${seed}_r$r"; continue; fi
     # beta = probability the expert drives a tick; it decays so later rounds visit the
     # states the student itself gets into. Labels always come from the expert.
     beta=$(python3 -c "print({1:0.5,2:0.25,3:0.1}[$r])")

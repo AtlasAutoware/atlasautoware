@@ -26,17 +26,22 @@ import policy_io as PIO                               # noqa: E402
 BEAMS = 540
 
 
-def load_shards(dirs, max_files=0):
+def load_shards(dirs, max_files=0, max_per_file=0, seed=0):
     files = sorted(f for d in dirs for f in glob.glob(os.path.join(d, '*.npz')))
     if max_files: files = files[:max_files]
     keys = ('front', 'scan', 'state', 'act', 'ids'); out = {k: [] for k in keys}; grp = []
     for gi, f in enumerate(files):
         z = np.load(f)
         if len(z['act']) == 0 or z['scan'].shape[1] != BEAMS: continue
-        for k in keys: out[k].append(z[k])
+        n = len(z['act']); sel = slice(None)
+        # cap only on-policy (DAgger) shards: long student rollouts (timeouts, up to ~700 frames)
+        # would otherwise dominate the data; expert demonstrations are kept whole
+        if max_per_file and n > max_per_file and 'dagger' in os.path.basename(os.path.dirname(f)):
+            sel = np.sort(np.random.default_rng(seed + gi).choice(n, max_per_file, replace=False))
+        for k in keys: out[k].append(z[k][sel])
         # group = task (file name without the seed) so train/val never share a route
         key = os.path.basename(f).rsplit('_s', 1)[0].encode()        # crc32: stable across runs
-        grp.append(np.full(len(z['act']), zlib.crc32(key), np.int64))
+        grp.append(np.full(len(out['act'][-1]), zlib.crc32(key), np.int64))
     return {k: np.concatenate(v) for k, v in out.items()}, np.concatenate(grp), len(files)
 
 
@@ -89,16 +94,19 @@ def main():
     ap.add_argument('--beam-drop', type=float, default=0.3); ap.add_argument('--val-frac', type=float, default=0.1)
     ap.add_argument('--init', default=None, help='warm start from a best.pt')
     ap.add_argument('--max-files', type=int, default=0)
+    ap.add_argument('--max-per-file', type=int, default=150, help='frames kept per episode shard')
     ap.add_argument('--state-mask', default='0,0,0,0,0',
                     help='per-dim multiplier on (vx, wz, gx, gy, gz), baked into the exported model. '
                          'Default zeros: with its own speed as an input the clone copies it '
                          '(v=0 -> speed 0) and never leaves the start line (the "inertia" problem)')
+    ap.add_argument('--inputs', default='camera,lidar', help='ablation: which image inputs the '
+                    'network may use; a removed one is zeroed inside the exported model too')
     ap.add_argument('--keep-stops', action='store_true',
                     help='keep the expert\'s at-goal stop frames. Off by default: where the goal is '
                          'is not in the observation, so these frames teach "stop" at arbitrary places')
     a = ap.parse_args()
     torch.manual_seed(a.seed); np.random.seed(a.seed); os.makedirs(a.out, exist_ok=True)
-    D, grp, nf = load_shards(a.data, a.max_files)
+    D, grp, nf = load_shards(a.data, a.max_files, a.max_per_file)
     if not a.keep_stops:
         keep = D['act'][:, 0] > 0.0                    # expert speed is exactly 0 only once done
         print(f'dropping {int((~keep).sum())} at-goal stop frames', flush=True)
@@ -111,7 +119,9 @@ def main():
     dev = 'cuda'
     print(f'{nf} shards, {len(tr_idx)} train / {len(va_idx)} val steps, action mean {mu.round(3)} sd {sd.round(3)}', flush=True)
     # everything lives on the GPU as uint8/half: ~46 KB a step, fine for ~100k steps on 8 GB
-    T = {'front': torch.from_numpy(D['front']).to(dev), 'scan': torch.from_numpy(D['scan']).to(dev),
+    # camera frames stay in pinned host memory (they are ~90% of the bytes; 8 GB of GPU is not
+    # enough once DAgger data accumulates); everything else lives on the GPU
+    T = {'front': torch.from_numpy(D['front']).pin_memory(), 'scan': torch.from_numpy(D['scan']).to(dev),
          'state': torch.from_numpy(D['state']).to(dev), 'act': torch.from_numpy(D['act']).to(dev),
          'ids': torch.from_numpy(D['ids']).to(dev)}
     del D
@@ -119,24 +129,39 @@ def main():
     raster = BEVRaster().to(dev); model = Student(0).to(dev)
     mask = torch.tensor([float(x) for x in a.state_mask.split(',')], device=dev)
     model.register_buffer('state_mask', mask)
-    _fwd = model.forward
-    model.forward = lambda front, bev, state, ids: _fwd(front, bev, state * model.state_mask, ids)
-    if a.init: model.load_state_dict(torch.load(a.init, map_location=dev))
+    use = set(a.inputs.split(','))
+    model.register_buffer('cam_on', torch.tensor(1.0 if 'camera' in use else 0.0, device=dev))
+    model.register_buffer('lidar_on', torch.tensor(1.0 if 'lidar' in use else 0.0, device=dev))
+    # Masks act on the encoder OUTPUTS, not the images: a zeroed image through a BatchNorm
+    # encoder trains on zero variance and then divides by ~sqrt(eps) at eval time (the first
+    # lidar-only run's validation error jumped between 0.4 and 33 m/s because of this).
+    def _fwd(front, bev, state, ids):
+        f = model.front(front) * model.cam_on
+        b = model.bev(bev) * model.lidar_on
+        t = model.txt(ids); st = model.state(state * model.state_mask)
+        return model.head(torch.cat([f, b, t, st], 1)), f
+    model.forward = _fwd
+    if a.init:   # masks are set by this run's flags; older checkpoints may not carry them
+        ckpt = {k: v for k, v in torch.load(a.init, map_location=dev).items()
+                if k not in ('state_mask', 'cam_on', 'lidar_on')}
+        missing, unexpected = model.load_state_dict(ckpt, strict=False)
+        assert set(missing) <= {'state_mask', 'cam_on', 'lidar_on'} and not unexpected, (missing, unexpected)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     steps = a.epochs * (len(tr_idx) // a.bs)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, a.lr, total_steps=max(steps, 20) + 1, pct_start=0.1)
     aug = {'cam_aug': a.cam_aug, 'cam_drop': a.cam_drop, 'beam_drop': a.beam_drop}
-    tr_t = torch.from_numpy(tr_idx).to(dev); va_t = torch.from_numpy(va_idx).to(dev)
+    tr_t = torch.from_numpy(tr_idx); va_t = torch.from_numpy(va_idx)
 
     def batch(ix, train):
-        f = T['front'][ix].permute(0, 3, 1, 2).float() / 255.0; s = T['scan'][ix].float()
+        f = T['front'][ix].to(dev, non_blocking=True).permute(0, 3, 1, 2).float() / 255.0
+        g = ix.to(dev, non_blocking=True); s = T['scan'][g].float()
         if train: f, s = augment(f, s, None, aug)
-        return f, raster(s), T['state'][ix], T['ids'][ix], T['act'][ix]
+        return f, raster(s), T['state'][g], T['ids'][g], T['act'][g]
 
     best = 1e9; log = open(os.path.join(a.out, 'log.jsonl'), 'w')
     for ep in range(a.epochs):
         model.train(); t0 = time.time(); tl = 0.0; nb = 0
-        perm = tr_t[torch.randperm(len(tr_t), device=dev)]
+        perm = tr_t[torch.randperm(len(tr_t))]
         for i in range(0, len(perm) - a.bs + 1, a.bs):
             f, b, st, ids, act = batch(perm[i:i + a.bs], True)
             pred, _ = model(f, b, st, ids)

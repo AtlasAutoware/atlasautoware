@@ -285,5 +285,87 @@
   },
   "unseen_map_success": 0.0,
   "unseen_map_progress": 0.507659811458422
+ },
+ "dagger_r1/none": {
+  "label": "DAgger round 1",
+  "perturb": "none",
+  "seeds": 1,
+  "episodes": 150,
+  "success": {
+   "mean": 0.04666666666666667,
+   "seed_sd": 0.0,
+   "ci": [
+    0.013333333333333334,
+    0.08
+   ],
+   "per_seed": [
+    0.0467
+   ]
+  },
+  "collided": {
+   "mean": 0.8066666666666666,
+   "seed_sd": 0.0,
+   "ci": [
+    0.74,
+    0.8666666666666667
+   ],
+   "per_seed": [
+    0.8067
+   ]
+  },
+  "progress": {
+   "mean": 0.6479667483195087,
+   "seed_sd": 0.0,
+   "ci": [
+    0.5964188306533815,
+    0.7017215114884421
+   ],
+   "per_seed": [
+    0.648
+   ]
+  },
+  "unseen_map_success": 0.0,
+  "unseen_map_progress": 0.4983677244994845
+ },
+ "dagger_r2/none": {
+  "label": "DAgger round 2",
+  "perturb": "none",
+  "seeds": 1,
+  "episodes": 150,
+  "success": {
+   "mean": 0.03333333333333333,
+   "seed_sd": 0.0,
+   "ci": [
+    0.006666666666666667,
+    0.06666666666666667
+   ],
+   "per_seed": [
+    0.0333
+   ]
+  },
+  "collided": {
+   "mean": 0.74,
+   "seed_sd": 0.0,
+   "ci": [
+    0.6666666666666666,
+    0.8133333333333334
+   ],
+   "per_seed": [
+    0.74
+   ]
+  },
+  "progress": {
+   "mean": 0.64711795695639,
+   "seed_sd": 0.0,
+   "ci": [
+    0.5955802403047052,
+    0.6991513233390797
+   ],
+   "per_seed": [
+    0.6471
+   ]
+  },
+  "unseen_map_success": 0.0,
+  "unseen_map_progress": 0.4668451469292926
  }
 }

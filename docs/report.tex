@@ -56,7 +56,8 @@
     tabsize=2
 }
 \lstset{style=mystyle}
-\graphicspath{{figures/}}
+\graphicspath{{figures/}{figures_report/}{results/}}
+\input{results/numbers.tex}
 
 \title{AtlasAutoware: Real-Time On-Vehicle Neural Network Inference\\
 for Autonomous 1/10-Scale Racing}
@@ -66,6 +67,26 @@ for Autonomous 1/10-Scale Racing}
 \begin{document}
 \maketitle
 
+\begin{abstract}
+\noindent A 1/10-scale racing car has a 100\,ms control period and one small computer. This
+report describes AtlasAutoware, a Jetson Orin Nano car that runs two neural networks on board
+inside that budget: a YOLOv8 opponent detector (5.4\,ms as a TensorRT FP16 engine) and a
+1.46\,M-parameter goal-conditioned driving policy distilled from a planning expert (1.8\,ms on
+the CPU with ONNX Runtime, 0.25\,ms in TensorRT). Most of the work is the platform that makes
+on-vehicle inference meaningful: actuation with feedback, sensing in the policy's frame, a
+browser teleoperation channel that doubles as a data channel, and a repository from which the
+car can be rebuilt. The central finding is about deployment rather than models. An end-to-end
+audit found that the car would have driven the learned policy at full steering lock and almost
+zero speed, because the network's (speed, steer) output was unpacked as (steer, speed); the lidar
+image it was trained on had been through lossy video compression; and the camera it expected
+had been removed. A closed-loop evaluation in simulation, sharing its input code with the car,
+measured the policy as deployed at 0\% goal success and 2.6\% route progress. After fixing the
+interface, the data and the inertia problem, route progress rose to \resBcNomProg\% while goal
+success stays low (\resDgthreeNomSucc\% after three rounds of DAgger), which is reported as
+it is. The platform also runs Ubuntu~26.04 with ROS~2 Lyrical in a container, with the
+package building and all unit tests passing there.
+\end{abstract}
+
 \section*{Introduction}
 
 This project picks up the 1/10-scale self-driving car in the SysLab annex where the
@@ -74,54 +95,41 @@ that could follow a hallway wall using a hobby ESC, a PWM breakout board and the
 DonkeyCar library, and it recommended that the next group not deviate from the
 F1TENTH bill of materials, because every substitution costs weeks.
 
-What I want to build is a vision-language driving policy: take an open
-vision-language-action or vision-language-navigation checkpoint (Alibaba's
-Qwen-Robot suite \cite{qwenrobot} is the current example, though the plan works with
-any of them) and post-train it on data from this car, so that it follows
-natural-language goals like ``go to the end of the hall and stop before the door''
-instead of a precomputed raceline. A second car, built from the same parts list, then
-opens up agent-to-agent experiments: two vehicles sharing pose and intent over the
-network.
+The question this report asks is narrower than ``can a learned policy race''. It is whether
+neural networks can run \emph{on the vehicle}, inside its control loop, and be trusted there:
+fast enough on a 25\,W Jetson, alongside the classical stack, and with the numbers they
+produce reaching the actuator with the meaning they had in training. The two networks are a
+YOLOv8 car detector for head-to-head racing and a small goal-conditioned driving policy (the
+``student'') distilled from a planning expert in simulation, with an optional feature-matching
+term toward a driving vision-language model as teacher \cite{qwenrobot}. Large
+vision-language-action models \cite{openvla, pi0, groot} do not fit this computer, so the
+student is the on-board half of that idea.
 
-That is not where most of this year went, and the gap is what this report is about.
-A policy like that is only as good as the robot underneath it, and the robot I
-inherited could not have produced usable training data. It could not report how fast its
-wheels were turning, so an ``action'' recorded during a demonstration would have been an
-uncalibrated PWM pulse. It had no inertial measurement, so there was no proprioceptive
-state to condition on, and no way to tell a skid from a straight line. It could only be
-driven by a person standing next to it with a wired gamepad, which caps a dataset at the
-length of a USB cable and one operator's patience. And it was a single physical artifact
-whose configuration lived in one laptop, so a second car meant reverse-engineering the
-first.
-
-The work in this report is therefore about the platform, and I have organized it that
-way: each change is justified by what it makes possible later, not by the lap time it
-saves.
+A policy is only as good as the robot underneath it, and the robot I inherited could not have
+produced usable training data or executed a learned command. It could not report how fast its
+wheels were turning, it had no inertial measurement, it could only be driven by a person
+standing next to it with a wired gamepad, and its configuration lived in one laptop. The first
+half of this report is therefore about the platform, each change justified by what it makes
+possible later:
 
 \begin{enumerate}
   \item \textbf{Actuation with feedback.} Rebuild the drivetrain around the VESC motor
-        controller the previous report gave up on, so commands are currents and speeds
-        with measured consequences. That is the label side of a demonstration.
-  \item \textbf{Sensing in the policy's coordinate frame.} Bring the lidar and camera
-        into ROS~2 in the shape the stack expects, including the camera's inertial unit,
-        which supplies proprioception, de-skews the lidar, and feeds the traction governor.
-  \item \textbf{Teleoperation as a data channel.} Make the car drivable from a browser
-        over its own network, so demonstrations can be collected by anyone, anywhere, with
-        the same message the policy will later emit.
-  \item \textbf{Reproducibility as infrastructure.} Put the configuration, firmware
-        state and scripts in the repository, so the second car is a clone instead of a
-        rebuild.
+        controller, so commands are currents and speeds with measured consequences.
+  \item \textbf{Sensing in the policy's coordinate frame.} Bring the lidar and camera into
+        ROS~2 in the shape the stack expects, including the camera's inertial unit.
+  \item \textbf{Teleoperation as a data channel.} Make the car drivable from a browser, so
+        demonstrations can be collected by anyone, with the same message a policy emits.
+  \item \textbf{Reproducibility as infrastructure.} Put configuration, firmware state and
+        scripts in the repository, so a second car is a clone instead of a rebuild.
 \end{enumerate}
 
-Perception is where the two halves meet. I trained and deployed a car detector on the
-platform, which is useful for head-to-head racing now and also a rehearsal of the
-train-offline, deploy-on-the-robot loop the pivot needs. All of it is checked into the
-team repository \cite{atlasrepo}. What I have \emph{not} done is validate the
-autonomous controller on the floor with the new drivetrain. The competition that was
-the deadline (Boston, September 6--7, 2026) was cancelled when most of the team
-withdrew, which is also what freed the project to pivot. The Results section separates
-what was measured from what still needs a track, and the Pivot section states what
-remains before a policy can be trained.
+The second half is about the networks on the car: how fast they run and what happens when
+they share the computer (Section~\ref{sec:inference}), an end-to-end audit of the learned
+policy's path from training data to actuator (Section~\ref{sec:audit}), and closed-loop training
+and evaluation in simulation (Sections~\ref{sec:training}--\ref{sec:results}). All of it is in
+the team repository \cite{atlasrepo}. What I have \emph{not} done is drive the learned policy
+on the floor; every closed-loop number here is from simulation, and the Limitations section
+says what that does and does not show.
 
 \section*{Prior Approaches}
 
@@ -307,7 +315,10 @@ estimate that the lidar node uses to de-skew each 100\,ms sweep, and the MPC's t
 governor reads the gyro yaw rate to back off speed when the car slides. Without an IMU
 both features are inert.
 
-I replaced the OAK-D node with the official Orbbec ROS~2 driver \cite{orbbecros2}
+For three weeks in September the car carried an Orbbec Gemini~335 instead; it has since
+gone back to the OAK-D Pro (DepthAI~2.33, 640$\times$360 at 30\,Hz with a 200\,Hz IMU), which
+the launch files now select by default. The Orbbec episode is still worth recording. I replaced
+the OAK-D node with the official Orbbec ROS~2 driver \cite{orbbecros2}
 (OrbbecSDK v2 branch, built on the Jetson) and remapped its colour topics onto the names
 the stack expects. The IMU needed more than a rename. The Orbbec reports acceleration
 and angular rate in the camera's optical frame ($x$ right, $y$ down, $z$ forward),
@@ -442,6 +453,11 @@ was raised from 0.35 to 0.5. The node is off by default in the car launch and en
 with \texttt{use\_perception:=true}, since it costs a CPU core and only the head-to-head
 agent uses it.
 
+After the move to JetPack~7.2.1 (CUDA~13.2, TensorRT~10.16) the TensorRT path works, and
+the engines are rebuilt on the car because they do not survive a TensorRT version change. The
+640-pixel detector runs at 5.41\,ms mean and 6.04\,ms at the 99th percentile as an FP16 engine
+(198 inferences per second), roughly 24 times faster than the ONNX Runtime CPU path above.
+
 \section*{What the Architecture Buys}
 
 Most of the individual pieces exist elsewhere. What matters here is that each one
@@ -453,7 +469,7 @@ temperatures, and accepts current commands directly. A logged demonstration is n
 triple of observation, action and outcome, all in physical units, and the same closed
 loop is what let the current-mode launch fix the low-speed stall.
 
-\paragraph{The camera is a motion sensor first.} The Orbbec's most useful output is
+\paragraph{The camera is a motion sensor first.} The camera's most useful output is
 its 200\,Hz inertial stream. It supplies the proprioceptive state a policy conditions on,
 it de-skews the lidar so scans stay accurate at speed, and it gives the traction governor
 a yaw rate. Vision is its second job.
@@ -486,80 +502,147 @@ blobs and the tools that restore them, the network and launch scripts, and a run
 the failures above. This is what turns ``build a second car'' into a parts order, and a
 second car is what makes any agent-to-agent work possible.
 
-\section*{The Pivot: A Post-Trained Driving Policy}
+\section*{The Learned Policy on the Car}
+\label{sec:policy}
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\textwidth]{pivot_pipeline.pdf}
-  \caption{The intended pipeline. The platform work above supplies the left box (data
-  with real actions and proprioception, collected by anyone over the network) and the
-  safety and control loops in the right box that a remote policy cannot be trusted to
-  provide.}
+  \caption{The training pipeline. A goal-conditioned expert (A* route plus pure pursuit) drives
+  in a ROS-free simulator; the student is trained on its demonstrations and on the states the
+  student itself reaches (DAgger), exported to ONNX, and run on the car by
+  \texttt{policy\_bridge} behind the same watchdog, emergency brake and command mux as every
+  other driver.}
   \label{fig:pivot}
 \end{figure}
 
-\subsection*{What the policy would be}
+The student takes four inputs every 100\,ms: the front camera frame resized to
+96$\times$128, the lidar scan rasterised into a 96$\times$96 bird's-eye image covering 6\,m in
+every direction, a 5-vector of proprioception, and the instruction text as hashed word tokens
+(for example ``turn left, then go straight to the end and stop''). Two small convolutional
+encoders, a bag-of-words embedding and a three-layer head (1.46\,M parameters in total) output
+a speed and a steering angle. The expert is the simulator's goal-conditioned planner: A* on the
+occupancy map inflated by the car's half-width, a pure-pursuit tracker, and a labeller that
+turns the route into the instruction. \texttt{tools/sim\_generate.py} and
+\texttt{ml/sim\_rollout.py} produce episodes in the car's own logging format, so the same
+training code can later take real episodes.
 
-Recent robotics foundation models pair a vision-language backbone with an action head
-and are meant to be post-trained on a target platform's data. Alibaba's
-Qwen-Robot suite \cite{qwenrobot} is the current instance, releasing a navigation model,
-a manipulation model and a video world model together, and open
-vision-language-action checkpoints such as OpenVLA \cite{openvla}, $\pi_0$
-\cite{pi0} and NVIDIA's GR00T~N1 \cite{groot} fill the same slot. The plan does not
-depend on the choice; it depends on the interface. All of them consume images, a
-natural-language instruction and some proprioceptive state, and emit a short chunk of
-future actions.
+On the car, \texttt{policy\_bridge} subscribes to the camera, the scan, odometry and the IMU,
+runs the network with ONNX Runtime at 10\,Hz, clamps speed and steering, applies a forward-cone
+emergency brake from the scan, and publishes on \texttt{/drive}, where \texttt{drive\_mux}
+gives any human command priority for half a second.
 
-For this car the mapping is direct: the Orbbec's colour frames and the instruction text
-are the inputs, the velocity EKF's speed and yaw rate are the proprioception, and the
-action is the (steering angle, speed) pair the Ackermann chain already accepts. The
-lidar is the one input these models were not designed for. The cheap first approach is to
-render each scan as a small bird's-eye image and let the vision encoder see it, and the
-more principled second version is a learned range tokenizer. The training objective is
-imitation on teleoperated episodes, with the raceline MPC available as a second source of
-demonstrations that are smoother than a human's.
+\section*{On-Vehicle Inference}
+\label{sec:inference}
 
-\subsection*{What has to be built}
+Table~\ref{tab:latency} gives the measured cost of both networks on the Orin Nano in its 25\,W
+mode, taken with the car on the bench and no actuator running. Pre-processing (resizing the
+640$\times$360 camera frame and rasterising a 720-bin scan) costs 1.6\,ms per control tick.
+The TensorRT FP16 student agrees with ONNX Runtime to within 0.0014\,m/s and 0.0004\,rad over
+200 inputs.
 
-Three things, none of which need new hardware. First, an \emph{episode logger}: a node
-that records synchronized camera, lidar, IMU, odometry and command streams into a
-standard imitation-learning format (LeRobot's dataset layout is the obvious target) with
-an instruction string per episode, plus a way to mark an episode good or bad without
-stopping. Second, a \emph{policy server}. The 2--4\,B-parameter models in this class will
-not run at a useful rate on an Orin Nano, so inference belongs on the laptop or a rented
-GPU, and the car keeps every fast loop (watchdog, emergency braking, traction governance,
-the 50\,Hz current loop) and treats the policy as one more source of \texttt{/cmd}
-messages under the same timeout. Third, \emph{evaluation}: success rate on held-out
-instructions in the hallway, and offline action-prediction error on held-out drives so
-models can be compared without risking the car.
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{p{7.6cm} r r}
+    \toprule
+    Network and runtime & mean (ms) & p99 (ms) \\
+    \midrule
+    Student, ONNX Runtime CPU, 1 / 2 / 4 threads & 5.50 / 3.05 / 1.84 & 5.74 / 3.19 / 2.08 \\
+    Student, TensorRT FP32 & 0.39 & 0.41 \\
+    Student, TensorRT FP16 & 0.25 & 0.28 \\
+    YOLOv8n-640 detector, TensorRT FP16 & 5.41 & 6.04 \\
+    \midrule
+    Student, TensorRT FP16, detector saturating the GPU & 1.70 & 2.77 \\
+    Student, ONNX Runtime CPU, detector saturating the GPU & 1.68 & 1.77 \\
+    Detector while sharing the GPU with the student & 5.75 & 7.86 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Inference latency on the Jetson Orin Nano Super (JetPack~7.2.1, 25\,W).}
+  \label{tab:latency}
+\end{table}
 
-\subsection*{Two cars}
+Both networks fit the 100\,ms control period many times over. The more useful result is the
+contention row: with the detector keeping the GPU busy, the TensorRT student's mean latency grows
+almost sevenfold and its tail more than that, while the CPU student is unaffected. For a network
+this small the GPU buys nothing once another network is using it, so the student stays on the
+CPU and the GPU belongs to the detector.
 
-The second car is what the \texttt{hardware/} folder was written for. With two vehicles
-on one network, each publishing pose, velocity and intended waypoints (over ROS~2 with a
-Zenoh middleware, or the same small JSON messages the web pilot already uses), the
-experiments become leader--follower, shared-goal navigation, and cooperative overtaking.
-The useful questions there are how much bandwidth an ``intent'' message actually needs and
-how gracefully behaviour degrades as the link gets worse. How far apart the two cars can
-be while that holds is set by the network mode from Stage~3, which is why that work sits
-in the report rather than in a footnote about convenience.
+With the full stack running together on the bench (lidar, OAK-D, the policy, the TensorRT
+detector and the raceline MPC, drive node off) the policy held 10.08\,Hz with control periods
+between 89 and 104\,ms (standard deviation 3.8\,ms). All six CPU cores sat at 81--90\%, which is
+the resource to watch, not the GPU. With the lidar and camera live and nothing able to move the
+car, the corrected policy commanded 0.012\,rad of steering with 14.5\,m of clear space ahead.
 
-\subsection*{Where this can go wrong}
+\section*{A Closed-Loop Audit of the Learned Policy}
+\label{sec:audit}
 
-The Orin Nano cannot host these models, so split inference is forced, and it puts a
-network link inside the control loop. That is fine at hallway speeds with a watchdog and
-not fine at racing speeds. Post-training a model this size on a laptop GPU means
-parameter-efficient fine-tuning and a small dataset, so a few hundred episodes from one
-hallway will produce a policy that is good at that hallway and not obviously anywhere
-else. And every VLA result I am building on is reported by its authors on their own
-platforms, mostly manipulators. Whether any of it transfers to a fast Ackermann vehicle
-with a 20\,cm wheelbase is the open question, and the reason it is worth trying.
+Before the work in this section, the student had a low offline validation error and had never
+been run closed-loop through the same code that feeds it on the car. I wrote a ROS-free
+evaluation (\texttt{ml/sim\_rollout.py}) that drives the policy in the simulator on a fixed,
+seeded set of 150 goal tasks, 30 on each of five maps, one of which (\emph{uploadtest}) is
+never used for training. It reports whether the car reaches within 0.5\,m of the goal without
+touching a wall (success), whether it collides, and how much of the planned route it covers
+(progress). Its inputs are built by \texttt{policy\_io.py}, the module that the car's bridge now
+imports, so a number measured here is a number about the deployed pipeline. Table~\ref{tab:audit}
+lists what it and the surrounding review found.
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{p{4.2cm} p{10.3cm}}
+    \toprule
+    Problem & Effect and fix \\
+    \midrule
+    Action order swapped &
+      The dataset stores (speed, steer); \texttt{policy\_bridge} unpacked (steer, speed). The
+      predicted speed ($\approx$1.4\,m/s) became a steering command clamped to full lock and the
+      predicted angle ($\approx$0) became the speed. Measured as deployed: 0\% success, 2.6\%
+      progress; with the order fixed, \resBaseNomSucc\% and \resBaseNomProg\%. Fixed by one shared
+      \texttt{policy\_io} module and an \texttt{action\_order} field in the ONNX metadata. The
+      training log's two labels were swapped the same way, which hid it. \\
+    Lossy lidar images &
+      The bird's-eye raster was stored as mp4 video; only 47\% of true lidar pixels stayed above
+      half intensity after decoding, while the car feeds the clean raster. Training now rebuilds
+      it from the raw scan. \\
+    Camera no longer fitted &
+      Remote mode launched the removed Orbbec camera, so the bridge would have waited for images
+      forever. The OAK-D Pro is now the default in launch, configuration and remote mode. \\
+    Unobservable stops &
+      The goal position is not in the observation, so ``stop here'' frames teach stopping at
+      arbitrary places. They are dropped from training. \\
+    Inertia problem &
+      Given its own speed as input, the clone copied it (speed 0 in, speed 0 out) and never left
+      the start line, the failure described by Codevilla et al.\ \cite{codevilla2019}. The speed
+      and yaw-rate inputs are masked inside the exported model. \\
+    NaN handling, shutdown &
+      A NaN output was clamped to full lock before being checked; it is now zeroed first. The
+      bridge sends an explicit zero command on exit, and the MPC no longer crashes on stop. \\
+    \bottomrule
+  \end{tabular}
+  \caption{Problems found between training data and actuator.}
+  \label{tab:audit}
+\end{table}
+
+\section*{Training for Closed Loop}
+\label{sec:training}
+
+Training data is 400 expert episodes (76\,817 frames) on four maps, generated in the
+simulator with the car's lidar geometry and a 640$\times$480 rendered camera, and trained on
+the laptop's RTX~5070. Three variants are compared, each with three seeds. \emph{BC, clean
+data} is plain behaviour cloning on the new episodes. \emph{BC + augmentation} adds camera gain,
+colour and noise augmentation, drops the camera frame entirely 30\% of the time, and randomly
+removes up to 30\% of lidar beams (the RPLidar C1 returns about 19\% empty bins on the bench),
+because the simulator's camera render will not look like the OAK-D. \emph{DAgger}
+\cite{ross2011dagger} then lets the student drive, with the expert taking a tick with
+probability 0.5, 0.25 and 0.1 in rounds 1--3, labels every state the student reaches with the
+expert's action, and retrains on the aggregate.
 
 \section*{Results}
 \label{sec:results}
 
-Everything in Table~\ref{tab:hw} was measured on the car on 2 September 2026 with the
-wheels off the ground or the car stationary.
+The platform measurements are in Table~\ref{tab:hw}; the closed-loop results of the learned
+policy follow.
 
 \begin{table}[H]
   \centering
@@ -569,58 +652,119 @@ wheels off the ground or the car stationary.
     Quantity & Measured \\
     \midrule
     Lidar scan rate (\texttt{/scan}) & 10.0\,Hz, 720 bins, 16\,m \\
-    Camera colour (\texttt{/oakd/rgb}) & 30\,Hz at 640$\times$480; 18--28\,Hz with the detector running \\
+    Camera colour (\texttt{/oakd/rgb}) & 30\,Hz at 640$\times$480 (Orbbec, 2 Sept); OAK-D Pro 15.9--19.1\,Hz on 23 Sept \\
     Camera IMU (\texttt{/oakd/imu}) & 195--200\,Hz; gravity on body $+z$ = 9.75\,m/s$^2$ \\
     Velocity EKF (\texttt{/ekf/odom}) & 200\,Hz \\
     VESC telemetry / wheel odometry & 50\,Hz / 20\,Hz; 16.4\,V, MOSFETs 26--29\,\textdegree C, fault 0 \\
     Speed tracking on a stand & commanded 1500 / 3500 / 6000 / 9000 eRPM; measured 1472 / 3493 / 5986 / 9006 \\
     Gamepad path, manual stack & full throttle held 10\,000 eRPM at 3--4\,A; steering full range \\
-    Detector on the Jetson CPU & 58\,ms per frame at 416\,px; 0 false detections in 55\,s of hands and faces \\
+    Detector & 58\,ms per frame at 416\,px on the CPU (2 Sept); 5.4\,ms at 640\,px in TensorRT (23 Sept) \\
     Web teleoperation & command round trip 1--2\,ms over the USB link; commands republished at 50\,Hz;
       steering follows to the servo limits; neutral within 250\,ms of the last packet \\
     \bottomrule
   \end{tabular}
-  \caption{Hardware measurements.}
+  \caption{Hardware measurements, wheels off the ground or car stationary (2 and 23 September 2026).}
   \label{tab:hw}
 \end{table}
 
-What is not in that table matters as much. The autonomous controller has not driven a
-lap on this drivetrain. The steering servo's centre and end-point values in the
-configuration are still the reference car's; the wheelbase and the lidar and camera
-mounting offsets in the static transforms are estimates, not measurements; the
-speed-to-RPM gain has been computed but not checked by driving a known distance; and the
-detector has only ever seen other F1TENTH cars in photographs, so its range estimate,
-which assumes a 0.30\,m car width, is unverified against a real opponent. On the
-teleoperation side, only the car's own 5\,GHz hotspot and the USB link have been driven
-through; the mesh-client, tethered and overlay-network paths are implemented and
-documented but not yet exercised, and no latency figures over cellular are claimed here.
-Nothing about the learned policy has been built; the Pivot section is a plan, not a
-result.
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{p{5.0cm} c r r r r}
+    \toprule
+    Policy & seeds & success \% [95\% CI] & collision \% & progress \% & unseen map \% \\
+    \midrule
+\csname @@input\endcsname results/table_nominal.tex
+    \bottomrule
+  \end{tabular}
+  \caption{Closed-loop results in simulation on the same 150 seeded goal tasks (30 per map).
+  Success = reached the goal without a collision. Confidence intervals are bootstrapped over
+  the pooled episodes of all seeds. ``Unseen map'' is success on the map never used for
+  training. The first row is the pre-9/23 student with the action-order bug fixed; as deployed
+  it scored 0\%.}
+  \label{tab:closedloop}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{closed_loop_2026-09-23.pdf}
+  \caption{Nominal closed-loop results (means with 95\% bootstrap intervals).}
+  \label{fig:closedloop}
+\end{figure}
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabular}{p{5.0cm} c c c c}
+    \toprule
+    Policy & nominal & lidar noise + 19\% dropout & camera shift & no camera \\
+    \midrule
+\csname @@input\endcsname results/table_robust.tex
+    \bottomrule
+  \end{tabular}
+  \caption{Success \% / progress \% under simulated sensor degradation (sim-side proxies for
+  the sim-to-real gap, not measurements on the car).}
+  \label{tab:robust}
+\end{table}
+
+The interface fixes are the large effect: with clean data and the inertia problem removed,
+the policy covers \resBcNomProg\% of the route on average, against \resBaseNomProg\% for the
+old student even after its action order is corrected, and 2.6\% as it was deployed. Goal
+success is a different matter. Without the goal in its observation, a memoryless policy must
+infer from the instruction and the scene alone where to turn and where the route ends, and it
+still leaves the route or touches a wall on most long tasks. Augmentation did not raise nominal
+success, though it made the policy indifferent to losing the camera entirely. Three rounds of
+DAgger left success at \resDgthreeNomSucc\% with \resDgthreeNomColl\% collisions, so on this task
+the missing information (where the goal is, and which turns have already been taken) matters
+more than the distribution shift that DAgger corrects. These are the
+numbers to beat, not a claim that the policy is ready to race.
+
+An input ablation (one seed, clean-data behaviour cloning, the removed input zeroed inside the
+exported network) asks which sensor the policy relies on: with the lidar raster alone it reached
+\resAbllidNomSucc\% success and \resAbllidNomProg\% progress, with the camera alone
+\resAblcamNomSucc\% and \resAblcamNomProg\%, against \resBcNomSucc\% and \resBcNomProg\% with
+both (three-seed mean). Because the simulator's camera is a render, this says what the policy
+can do with each input in simulation, not which one will transfer better.
+
+\section*{Software Platform: Ubuntu 26.04 and ROS 2 Lyrical}
+\label{sec:lyrical}
+
+The car runs JetPack~7.2.1 on Ubuntu~24.04 with ROS~2 Jazzy. NVIDIA's JetPack~7 is built on
+Ubuntu~24.04 \cite{jetpack}, the installed TensorRT Python binding requires Python~3.12 while
+Ubuntu~26.04 ships 3.14, and the SD card has one root partition with no fallback, so an in-place
+upgrade four days before a competition is not justified. Instead, an Ubuntu~26.04 image with ROS~2
+Lyrical \cite{roslyrical} is built on the car itself (\texttt{docker/lyrical/Dockerfile}); the car
+has no internet of its own, so packages come through a small allowlisted proxy on the laptop over
+an SSH reverse tunnel. Inside it the package builds with \texttt{colcon}, 48 of its 49 Python
+modules import (the exception needs the legacy \texttt{gym} used only by the simulator bridge),
+and all 149 unit tests pass, the same count as on the host. A native upgrade plan, starting from a
+cloned SD card so the original remains the rollback, is in \texttt{docs/ubuntu26\_native\_plan.md}.
+One finding from this work applies to everything: the car has no real-time clock battery or time
+source and boots with a stale date, which breaks certificate and package-list validation.
+
+\section*{Limitations}
+
+Every closed-loop number in this report is from simulation. The simulator's camera is a
+distance-shaded raycast render, so the camera encoder has never been trained on a real image;
+the robustness table uses simple sim-side perturbations as proxies, not the real sensor. The
+bicycle model has no tyre slip and a point-sized car for collisions. The hardware measurements
+were taken on the bench: the learned policy has not driven the floor, and the concurrency run had
+no localisation, so the MPC was not solving. Goal success remains low; the result of this work is
+a deployment path that can be trusted and measured, not a finished policy.
 
 \section*{Next Steps}
 
-The immediate platform work is unchanged and short: drive a measured five metres and
-compare the odometry before trusting any autonomy; calibrate the servo the way the 2024
-report did (a range finder on the front wheel) and enter the centre and limits in both
-stacks' configuration, which also removes the right-hand pull that the web trim currently
-masks; measure the wheelbase and the two sensor offsets. Install the JetPack CUDA and
-TensorRT packages when the Jetson is on a network that is not a captive portal; the
-perception node already prefers a TensorRT engine if one is present, and the 640-pixel
-export is in the repository for that purpose.
+Move the student to a task its inputs can support, lap following on a race line with the MPC as
+expert, which is also the competition task. Collect real episodes with the OAK-D and the C1
+through \texttt{episode\_logger}, measure the offline sim-to-real gap on them, and then run the
+student on the floor at 0.6\,m/s behind the emergency brake and the human-priority mux. Repeat
+the concurrency test with localisation running, and find what is using the CPU. Fix the clock.
 
-Then the pivot, in roughly increasing order of risk. Build the episode logger and collect
-a first dataset while driving the hallway by hand, which is useful whichever model wins.
-Stand up a policy server against a small checkpoint and verify the timing and the safety
-envelope with a deliberately trivial policy before running a real one. Only then
-post-train and evaluate. Build the second car from the \texttt{hardware/} folder in
-parallel; it is a parts order and a weekend rather than a research risk, and every
-agent-to-agent question needs it.
-
-Two warnings for whoever picks this up. Keep the battery connector keyed or marked: the
-VESC dies instantly on reversed leads, and a replacement took a week to arrive. And read
-\texttt{hardware/RUNBOOK.md} before touching the VESC's application settings, because the
-shared PPM/servo pin will look like a dead motor controller to anyone who does not know
-about it.
+Two warnings for whoever picks this up remain from the platform work. Keep the battery connector
+keyed or marked: the VESC dies instantly on reversed leads. And read
+\texttt{hardware/RUNBOOK.md} before touching the VESC's application settings, because the shared
+PPM/servo pin will look like a dead motor controller to anyone who does not know about it.
 
 \section*{Acknowledgments}
 
