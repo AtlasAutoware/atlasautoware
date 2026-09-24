@@ -3,7 +3,7 @@
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:turing:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=48G
 #SBATCH --time=06:00:00
 #SBATCH --output=slurm_logs/09_prod_%j.out
 # One stage of the production run (ml/run_production.sh): STAGE=prep | seed (with SEEDS) | select
