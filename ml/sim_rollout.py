@@ -102,7 +102,7 @@ class OnnxPolicy:
 
 
 def rollout(task, policy, beta=0.0, record=False, seed=0, perturb=None, dt=0.02,
-            sensor_hz=10.0, max_speed=1.5, time_mult=2.0):
+            sensor_hz=10.0, max_speed=1.5, time_mult=2.0, hint_fn=None):
     """One closed-loop episode. policy: OnnxPolicy or None (= expert). Returns (result, data)."""
     sm, _ = get_map(task['map']); path = [tuple(p) for p in task['path']]
     rng = np.random.default_rng(seed); P = np.asarray(path)
@@ -129,7 +129,10 @@ def rollout(task, policy, beta=0.0, record=False, seed=0, perturb=None, dt=0.02,
             if perturb: front, scan = perturb_obs(front, scan, perturb, rng)
             bev = PIO.bev_image(scan, -math.pi, inc)
             wz = st[3] / WHEELBASE * math.tan(steer_applied)
-            hx, hy = PIO.route_hint(st[:3], path)
+            if hint_fn is None:
+                hx, hy = PIO.route_hint(st[:3], path); hold = False
+            else:                                   # car-side hint (ml/car_route_check.py)
+                h = hint_fn(st, t); hold = h is None; hx, hy = (0.0, 0.0) if hold else h
             state = np.array([st[3], wz, hx, hy, wz], np.float32)   # [2:4] = route hint (masked out of older models)
             ev, es, edone, _ = pure_pursuit(st[:3], path, wheelbase=WHEELBASE)
             if record:
@@ -142,6 +145,7 @@ def rollout(task, policy, beta=0.0, record=False, seed=0, perturb=None, dt=0.02,
             else:
                 v, s = policy(front, bev, state, ids)
                 act = (float(np.clip(v, 0.0, max_speed)), float(np.clip(s, -MAX_STEER, MAX_STEER)))
+                if hold: act = (0.0, act[1])        # policy_bridge publishes zero speed without a route
                 se += abs(act[1] - es); sp += abs(act[0] - ev); n += 1
                 res['student_ticks'] += 1
             res['ticks'] += 1

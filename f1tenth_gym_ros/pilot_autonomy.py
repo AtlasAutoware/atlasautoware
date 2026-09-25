@@ -164,7 +164,7 @@ class Supervisor:
                                   'v_scale': v_scale, 'odom_topic': odom_topic}, env)
 
     def engage_policy(self, instruction, max_speed, scan_topic='/scan', model='models/student.onnx',
-                      odom_topic='/odom', env=None):
+                      odom_topic='/odom', env=None, goal=''):
         """Mode 3: the distilled goal-conditioned student (policy_bridge) drives via /drive."""
         if self.engaged():
             return False, 'already engaged'
@@ -177,7 +177,10 @@ class Supervisor:
                '-p', f'max_speed:={max_speed}', '-p', f'scan_topic:={scan_topic}',
                '-p', f'odom_topic:={odom_topic}', '-p', 'drive_topic:=/drive',
                '-p', f"image_topic:={os.environ.get('ATLAS_IMAGE_TOPIC', '/oakd/rgb')}"]
+        if goal:                                  # "x,y" map metres, for route-hint models
+            cmd += ['-p', f'goal:={goal}']
         return self._launch(cmd, {'mode': 'policy', 'instruction': instruction, 'max_speed': max_speed,
+                                  'goal': goal,
                                   'model': os.path.basename(path)}, env)
 
     def _launch(self, cmd, params, env=None):

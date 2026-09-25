@@ -11,7 +11,7 @@ seconds (0.25) a neutral Joy is published and the car stops. /joy feeds the unch
 F1TENTH chain: joy_teleop (F310 profile: button 4 = dead-man, axis 1 throttle, axis 3
 steer) -> ackermann_mux -> ackermann_to_vesc -> vesc_driver.
 """
-import json, os, socket, threading, time
+import json, os, re, socket, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 import numpy as np, cv2
@@ -118,6 +118,7 @@ overrides the policy (the mux gives teleop priority). Closing this tab stops the
 <section>
 <h3>Goal policy (distilled student)</h3>
 <label>goal <input id="pinstr" type="text" placeholder="turn left, then go straight to the end and stop" style="width:290px"></label>
+<label>goal x,y <input id="pgoal" type="text" placeholder="map m, e.g. 3.5,-1.2" style="width:120px"></label>
 <label>max speed <input id="pspd" type="range" min="0.2" max="1.5" step="0.1" value="0.6"> <span id="pspdv">0.6 m/s</span></label>
 <div style="margin-top:4px"><button id="pengage" style="background:#264;border-color:#4a7">ENGAGE POLICY</button>
   <span style="font-size:11px;color:#999">needs models/student.onnx on the car; same STOP / Space / override as raceline</span></div>
@@ -252,7 +253,7 @@ $('pspd').oninput=()=>{$('pspdv').textContent=$('pspd').value+' m/s';};
 $('pengage').onclick=()=>{
   const g=$('pinstr').value.trim(); if(!g){alert('type a goal instruction');return;}
   if(!confirm('Engage the goal policy?\nGoal: "'+g+'"\nThe car will move on its own. Space/Esc stops it; holding a key overrides it.'))return;
-  fetch('/auto/engage',{method:'POST',body:JSON.stringify({mode:'policy',instruction:g,max_speed:parseFloat($('pspd').value)})})
+  fetch('/auto/engage',{method:'POST',body:JSON.stringify({mode:'policy',instruction:g,goal:$('pgoal').value.trim(),max_speed:parseFloat($('pspd').value)})})
    .then(r=>r.json()).then(s=>{if(s.error){alert(s.error+(s.checks?'\n'+s.checks.filter(c=>!c.ok).map(c=>'- '+c.name+': '+c.detail).join('\n'):''));}else renderAuto(s);});
 };
 $('odom').onchange=()=>fetch('/auto/odom',{method:'POST',body:JSON.stringify({odom_topic:$('odom').value})}).then(r=>r.json()).then(renderAuto);
@@ -407,7 +408,11 @@ class H(BaseHTTPRequestHandler):
                 if not all(c['ok'] for c in checks) and not d.get('override'):
                     self._json({'error': 'preflight failed', 'checks': checks}, 409); return
                 SUP.heartbeat()
-                ok, msg = SUP.engage_policy(str(d.get('instruction', ''))[:200], d.get('max_speed', 0.6), scan_topic=scan_topic)
+                goal = str(d.get('goal', '') or '').replace(' ', '')
+                if goal and not re.fullmatch(r'-?\d+(\.\d+)?,-?\d+(\.\d+)?', goal):
+                    self._json({'error': 'goal must be x,y in metres (map frame)'}, 400); return
+                ok, msg = SUP.engage_policy(str(d.get('instruction', ''))[:200], d.get('max_speed', 0.6),
+                                            scan_topic=scan_topic, goal=goal)
                 self._json(auto_status() if ok else {'error': msg}, 200 if ok else 400); return
             rl = os.path.basename(str(d.get('raceline', '')))
             ok, checks = SUP.preflight(ages(), rl, odom)
