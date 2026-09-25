@@ -85,3 +85,39 @@ def front_clear(ranges, angle_min, angle_inc, half_width_rad=0.2):
     ang = (ang + np.pi) % (2 * np.pi) - np.pi
     m = (np.abs(ang) <= half_width_rad) & np.isfinite(r) & (r > 0.05)
     return float(r[m].min()) if m.any() else 99.0
+
+
+# Route hint (added 9/25). The goal-conditioned task was not solvable from the original
+# inputs: the policy sees the scene and a bag-of-words route description, never where the
+# goal is, so it cannot know where to turn or stop (5-seed success plateaued near 8-11%).
+# The fix is the standard one for learned local driving: give the network a point on the
+# planned route, in the car frame. It rides in state[2:4], which on the car carried IMU
+# roll/pitch rates (near zero on a flat floor and masked out of every earlier model), so
+# the 5-wide ONNX interface does not change and old models are unaffected.
+HINT_LOOKAHEAD = 2.0          # metres along the route ahead of the car
+HINT_SCALE = 2.0              # hint = car-frame point / HINT_SCALE, clipped to +-1.5
+IDX_HINT = (2, 3)
+
+
+def route_hint(pose, path, lookahead=HINT_LOOKAHEAD, scale=HINT_SCALE):
+    """pose (x, y, theta) in the map frame; path = list of (x, y) from start to goal.
+    Returns the point `lookahead` metres along the path past the nearest path point,
+    in the car frame (x forward, y left), divided by `scale`. Near the goal the point
+    is the goal itself, so the hint shrinks toward (0, 0) as the car arrives."""
+    import math
+    P = np.asarray(path, np.float64)
+    x, y, th = pose
+    i = int(np.argmin(np.hypot(P[:, 0] - x, P[:, 1] - y)))
+    seg = np.hypot(*np.diff(P[i:], axis=0).T) if len(P) - i > 1 else np.zeros(0)
+    acc = 0.0
+    tx, ty = P[-1]
+    for k, L in enumerate(seg):
+        if acc + L >= lookahead:
+            f = (lookahead - acc) / max(L, 1e-9)
+            tx, ty = P[i + k] + f * (P[i + k + 1] - P[i + k])
+            break
+        acc += L
+    dx, dy = tx - x, ty - y
+    lx = math.cos(-th) * dx - math.sin(-th) * dy
+    ly = math.sin(-th) * dx + math.cos(-th) * dy
+    return float(np.clip(lx / scale, -1.5, 1.5)), float(np.clip(ly / scale, -1.5, 1.5))

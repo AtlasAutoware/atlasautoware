@@ -129,7 +129,8 @@ def rollout(task, policy, beta=0.0, record=False, seed=0, perturb=None, dt=0.02,
             if perturb: front, scan = perturb_obs(front, scan, perturb, rng)
             bev = PIO.bev_image(scan, -math.pi, inc)
             wz = st[3] / WHEELBASE * math.tan(steer_applied)
-            state = np.array([st[3], wz, 0.0, 0.0, wz], np.float32)
+            hx, hy = PIO.route_hint(st[:3], path)
+            state = np.array([st[3], wz, hx, hy, wz], np.float32)   # [2:4] = route hint (masked out of older models)
             ev, es, edone, _ = pure_pursuit(st[:3], path, wheelbase=WHEELBASE)
             if record:
                 rec['front'].append(front); rec['bev'].append(bev); rec['state'].append(state)
